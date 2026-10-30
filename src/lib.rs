@@ -11,4 +11,5 @@ pub mod logger;
 pub mod naming;
 pub mod normalize;
 pub mod policy;
+pub mod proxy;
 pub mod reason;

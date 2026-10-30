@@ -59,6 +59,9 @@ upstream_ca_bundle = ""          # optional extra roots (PEM); verification is a
 # username = "analyst"
 # password_hash = "$argon2id$..."   # from: webfilter-proxy hash-password
 
+[http]                           # HTTP/1 parser (A-25); strict by default
+compat = false                   # true: allow lowercase methods + chunk extensions (never relaxes anti-smuggling rules)
+
 [http2]                          # Phase 6, intercepted TLS only (D-40, D-45); limits may be tuned, never disabled
 max_concurrent_streams = 100
 max_header_list_size = 65536
