@@ -3,7 +3,7 @@
 
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 
 use crate::config::PortConfig;
@@ -31,34 +31,63 @@ pub fn check_port(kind: PortKind, port: u16, cfg: &PortConfig) -> Result<(), Rea
     if set.allows(port) { Ok(()) } else { Err(Reason::PortNotAllowed) }
 }
 
-/// Always denied regardless of configuration: metadata endpoints and `0.0.0.0/8` (D-11).
-pub fn is_always_denied(ip: IpAddr) -> bool {
-    match fold_ip(ip) {
-        IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 0,
-        IpAddr::V6(v6) => v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
+/// IPv4 embedded in an IPv6 transition address: NAT64 `64:ff9b::/96`, IPv4-compatible
+/// `::a.b.c.d`, 6to4 `2002::/16`, Teredo `2001::/32` (client address, bit-inverted). Such
+/// addresses reach that IPv4, so policy checks it too (PF-1-04).
+pub fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let o = v6.octets();
+    let last = Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+    match v6.segments() {
+        [0x64, 0xff9b, 0, 0, 0, 0, _, _] => Some(last),
+        [0, 0, 0, 0, 0, 0, _, _] if !v6.is_loopback() && !v6.is_unspecified() => Some(last),
+        [0x2002, hi, lo, ..] => Some(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo))),
+        [0x2001, 0, ..] => Some(Ipv4Addr::from(!u32::from(last))),
+        _ => None,
     }
 }
 
-/// Loopback, RFC 1918, CGNAT, link-local, ULA, multicast, unspecified, broadcast (D-11).
+/// Always denied regardless of configuration: metadata endpoints (AWS/GCP/Azure link-local,
+/// AWS IPv6, Oracle, Alibaba) and `0.0.0.0/8`, also when embedded in IPv6 (D-11).
+pub fn is_always_denied(ip: IpAddr) -> bool {
+    match fold_ip(ip) {
+        IpAddr::V4(v4) => {
+            v4.is_link_local()
+                || v4.octets()[0] == 0
+                || v4 == Ipv4Addr::new(192, 0, 0, 192)
+                || v4 == Ipv4Addr::new(100, 100, 100, 200)
+        }
+        IpAddr::V6(v6) => {
+            v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
+                || embedded_ipv4(v6).is_some_and(|v4| is_always_denied(IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// Loopback, RFC 1918, CGNAT, link-local, ULA, multicast, unspecified, IETF/reserved/benchmark
+/// IPv4 ranges, NAT64 local-use, and transition addresses embedding any of these (D-11).
 pub fn is_private(ip: IpAddr) -> bool {
     match fold_ip(ip) {
         IpAddr::V4(v4) => {
-            let cgnat = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64;
+            let [a, b, c, _] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
-                || cgnat
+                || (a == 100 && (b & 0xc0) == 64) // CGNAT 100.64/10
                 || v4.is_link_local()
                 || v4.is_multicast()
                 || v4.is_unspecified()
-                || v4.is_broadcast()
+                || (a, b, c) == (192, 0, 0) // IETF protocol assignments 192.0.0/24
+                || a >= 240 // reserved 240/4 incl. broadcast
+                || (a == 198 && (b & 0xfe) == 18) // benchmarking 198.18/15
         }
         IpAddr::V6(v6) => {
-            let seg0 = v6.segments()[0];
+            let [s0, s1, s2, ..] = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (seg0 & 0xffc0) == 0xfe80 // link-local
-                || (seg0 & 0xfe00) == 0xfc00 // ULA
+                || (s0 & 0xffc0) == 0xfe80 // link-local
+                || (s0 & 0xfe00) == 0xfc00 // ULA
+                || (s0, s1, s2) == (0x64, 0xff9b, 1) // NAT64 local-use 64:ff9b:1::/48
+                || embedded_ipv4(v6).is_some_and(|v4| is_private(IpAddr::V4(v4)))
         }
     }
 }
