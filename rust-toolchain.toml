@@ -1,0 +1,5 @@
+# Pinned toolchain (docs/ENVIRONMENT.md). Bump only via the procedure in ENVIRONMENT.md.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+profile = "minimal"

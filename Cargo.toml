@@ -1,0 +1,92 @@
+[package]
+name = "webfilter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.0"
+license = "MIT"
+description = "Multi-threaded filtering HTTP/HTTPS proxy and client"
+publish = false
+
+[lib]
+name = "webfilter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "webfilter-proxy"
+path = "src/bin/webfilter-proxy.rs"
+
+[[bin]]
+name = "webfilter-client"
+path = "src/bin/webfilter-client.rs"
+
+[features]
+default = []
+# TEST ONLY (D-20, D-44). Must never be enabled in release builds; CI asserts this.
+insecure-test = []
+# Optional YARA scanning (Phase 10): add `yara-x` with `cargo add yara-x --optional` and wire it to this feature.
+yara = []
+
+# Dependencies: add with `cargo add` in Phase 0 from the approved list (docs/DECISIONS.md D-27),
+# then record the resolved versions in docs/ENVIRONMENT.md.
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"   # NEVER "abort": per-connection panic isolation requires unwinding (SPEC 9)
+
+[dependencies]
+anyhow = "1.0.104"
+arc-swap = "1.9.3"
+argon2 = "0.6.0"
+base64 = "0.23.1"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive"] }
+futures-util = "0.3.34"
+getrandom = "0.4.3"
+hex = "0.4.3"
+http = "1.5.0"
+http-body-util = "0.1.5"
+httparse = "1.10.1"
+httpdate = "1.0.3"
+hyper = { version = "1.12.0", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+idna = "1.1.0"
+ipnet = "2.12.2"
+moka = { version = "0.12.16", features = ["sync"] }
+rcgen = "0.14.10"
+regex = "1.13.1"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1.15.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_urlencoded = "0.7.1"
+sha2 = "0.11.1"
+socket2 = "0.6.5"
+subtle = "2.6.1"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "macros"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal", "fs"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-util = "0.7.20"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+url = "2.5.8"
+uuid = { version = "1.29.0", features = ["v7"] }
+webpki-roots = "1.0.11"
+zeroize = "1.9.1"
+
+[dev-dependencies]
+proptest = "1.12.0"
+tempfile = "3.27.0"

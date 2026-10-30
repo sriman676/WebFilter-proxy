@@ -1,0 +1,59 @@
+# Blocklist-bypass / normalization corpus. Columns: id<TAB>raw_request_target<TAB>blocklist_entry<TAB>expected<TAB>note
+# expected: BLOCK (403 rule), ALLOW (forwarded), REJECT400 (invalid_request or parser_differential), BLOCK_USERINFO
+# Setup: domains.txt contains "evil.com"; url_patterns contains "/admin/" . Test hosts resolve via the injected resolver.
+U-001	http://evil.com/	evil.com	BLOCK	exact
+U-002	http://EVIL.COM/	evil.com	BLOCK	case
+U-003	http://evil.com./	evil.com	BLOCK	single trailing dot
+U-004	http://evil.com../	evil.com	REJECT400	multiple trailing dots
+U-005	http://a.b.evil.com/	evil.com	BLOCK	subdomain
+U-006	http://notevil.com/	evil.com	ALLOW	suffix-but-not-subdomain
+U-007	http://evil.com.attacker.test/	evil.com	ALLOW	evil.com is a prefix label, not suffix
+U-008	http://evil.com:80/	evil.com	BLOCK	explicit default port
+U-009	http://evil.com:8080/	evil.com	BLOCK	non-default port still blocked (port policy checked first only for allowed ports)
+U-010	http://good.test@evil.com/	evil.com	BLOCK_USERINFO	userinfo trick (host is evil.com)
+U-011	http://evil.com@good.test/	evil.com	BLOCK_USERINFO	userinfo trick (host is good.test)
+U-012	http://evil.com%2f@good.test/	evil.com	BLOCK_USERINFO	encoded slash + @ in authority (no earlier-reject char, so userinfo rule applies)
+U-013	http://evil.com\@good.test/	evil.com	REJECT400	backslash
+U-014	http://evil.com\.good.test/	evil.com	REJECT400	backslash confusion
+U-015	http:\\evil.com/	evil.com	REJECT400	scheme/backslash confusion
+U-016	http:///evil.com/	evil.com	REJECT400	extra slash (slash confusion)
+U-017	http:/evil.com/	evil.com	REJECT400	missing slash
+U-018	evil.com/	evil.com	REJECT400	origin-form without scheme on plain listener
+U-019	http://evil.com#@good.test/	evil.com	REJECT400	fragment in proxy request
+U-020	http://evil.com?@good.test/	evil.com	BLOCK	query contains @; host is evil.com
+U-021	http://%65vil.com/	evil.com	REJECT400	percent-encoded host
+U-022	http://evi%6c.com/	evil.com	REJECT400	percent-encoded host char
+U-023	http://xn--evil-.com/	evil.com	REJECT400	invalid punycode
+U-024	http://ｅｖｉｌ.com/	evil.com	REJECT400	raw non-ASCII (fullwidth) in request target
+U-025	http://127.0.0.1/	ip:127.0.0.1	BLOCK	literal IP in ip_blocklist
+U-026	http://2130706433/	ip:127.0.0.1	REJECT400	decimal IPv4 (parser differential)
+U-027	http://0x7f.0.0.1/	ip:127.0.0.1	REJECT400	hex IPv4
+U-028	http://0177.0.0.1/	ip:127.0.0.1	REJECT400	octal IPv4
+U-029	http://127.1/	ip:127.0.0.1	REJECT400	short IPv4
+U-030	http://[::ffff:127.0.0.1]/	ip:127.0.0.1	BLOCK	IPv4-mapped IPv6 converted for policy
+U-031	http://[::1]/	ip:::1	BLOCK	IPv6 loopback in ip_blocklist
+U-032	http://[fe80::1%25eth0]/	-	REJECT400	IPv6 zone id
+U-033	http://169.254.169.254/latest/meta-data/	-	BLOCK	always-deny metadata IP (rule private_range)
+U-034	http://good.test/admin/	/admin/	BLOCK	url pattern
+U-035	http://good.test/ADMIN/	/admin/	BLOCK	case-insensitive pattern
+U-036	http://good.test/%61dmin/	/admin/	BLOCK	percent-encoded unreserved char decoded
+U-037	http://good.test/a/../admin/	/admin/	BLOCK	dot-segment normalization
+U-038	http://good.test/%2e%2e/admin/	/admin/	BLOCK	encoded dot segments
+U-039	http://good.test/%252e%252e/admin/	/admin/	BLOCK	double-encoded (decoded-twice view), suspicious_encoding=true
+U-040	http://good.test/admin%2f	/admin/	BLOCK	encoded slash (decoded view)
+U-041	http://good.test//admin/	/admin/	BLOCK	double slash not collapsed but pattern still matches substring
+U-042	http://good.test/x.exe	ext:.exe	BLOCK	extension rule
+U-043	http://good.test/x.EXE?download=1	ext:.exe	BLOCK	case + query stripped before ext check
+U-044	http://good.test/x.exe%00.txt	ext:.exe	REJECT400	NUL byte
+U-045	http://good.test/x.exe;.txt	ext:.exe	ALLOW	documented limitation: ';' params are not special (record in docs)
+U-046	http://good.test:0/	-	REJECT400	port 0
+U-047	http://good.test:99999/	-	REJECT400	port out of range
+U-048	http://good.test:80@evil.com/	evil.com	BLOCK_USERINFO	port-like userinfo
+U-049	http://good.test /	-	REJECT400	space in target
+U-050	http://good.test/%0d%0aX-Injected:1	-	ALLOW	CRLF is percent-encoded and MUST be forwarded still encoded (never decoded into the request line)
+U-051	http://good.test/\x0d\x0aX-Injected:1	-	REJECT400	raw CR/LF in target
+U-052	HTTP://EVIL.com/	evil.com	BLOCK	scheme case
+U-053	http://EVIL.com:80/%2e/	evil.com	BLOCK	combined variants
+U-054	http://xn--80ak6aa92e.com/	-	ALLOW	valid punycode homograph host is allowed (no entry); homograph defense is out of scope, log only
+U-055	http://evil.com./admin/	evil.com	BLOCK	trailing dot + path
+# Precedence note for step 4.5.1: first reject-list (control/space/backslash/raw non-ASCII/fragment/%00) -> 400; then userinfo -> 403 userinfo_in_url.

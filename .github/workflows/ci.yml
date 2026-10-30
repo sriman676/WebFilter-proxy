@@ -1,0 +1,87 @@
+# CI (SPEC 10). Actions pinned by commit SHA (ENVIRONMENT rule 5); toolchain from rust-toolchain.toml;
+# every cargo invocation uses --locked. Offline tests only (D-29).
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: python3 scripts/docs_check.py
+      - run: python3 scripts/check_gitignore.py
+      - run: python3 scripts/ui_lint.py
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
+      - run: cargo nextest run --locked --features insecure-test --no-tests=pass
+      - run: cargo test --locked --features insecure-test --doc
+      - run: cargo llvm-cov nextest --locked --features insecure-test --fail-under-lines 70
+
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-deny,cargo-audit
+      - run: cargo deny check
+      - run: cargo audit
+
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: build release (insecure-test OFF) and assert test hooks absent
+        run: |
+          cargo build --release --locked
+          for b in webfilter-proxy webfilter-client; do
+            if grep -a -q -e WEBFILTER_TEST_HOSTS -e WEBFILTER_TEST_ORIG_DST "target/release/$b"; then
+              echo "::error::$b contains test-only hooks"; exit 1
+            fi
+          done
+
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-fuzz
+      - name: fuzz each target for 60 s on the pinned nightly
+        run: |
+          nightly=$(sed -n 's/^fuzz_nightly := "\(.*\)"/\1/p' justfile)
+          rustup toolchain install "$nightly" --profile minimal
+          targets=$(cargo +"$nightly" fuzz list)
+          [ -n "$targets" ] || { echo "::error::no fuzz targets"; exit 1; }
+          for t in $targets; do
+            cargo +"$nightly" fuzz run "$t" --locked -- -max_total_time=60
+          done

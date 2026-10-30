@@ -1,0 +1,19 @@
+# LAB / DEMO ONLY (M1 demo, scripts/demo.sh, local-origin experiments). The hardened defaults live in config.example.toml.
+# Missing keys take their documented defaults.
+mode = "enforce"
+listen = "127.0.0.1:18080"
+
+[ports]
+http_allowed = "any"
+connect_allowed = "any"
+
+[destination]
+deny_private_ranges = false      # local test origins live on loopback
+
+[logging]
+dir = "../logs"
+
+[blocklists]
+domains = "blocklists/domains.txt"
+url_patterns = "blocklists/url_patterns.txt"
+ip_blocklist = "blocklists/ip_blocklist.txt"

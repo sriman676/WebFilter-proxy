@@ -1,0 +1,16 @@
+# Robots corpus (SPEC_EXT_CLIENT C4, RFC 9309). Columns: id<TAB>robots_txt (\n escaped)<TAB>agent<TAB>path<TAB>expected
+RB-01	User-agent: *\nDisallow: /private	webfilter-client	/private/x	DISALLOW
+RB-02	User-agent: *\nDisallow: /private	webfilter-client	/public	ALLOW
+RB-03	User-agent: *\nDisallow: /*.pdf$	webfilter-client	/a.pdf	DISALLOW
+RB-04	User-agent: *\nDisallow: /*.pdf$	webfilter-client	/a.pdf?x=1	ALLOW
+RB-05	User-agent: *\nDisallow: /private\nAllow: /private/ok	webfilter-client	/private/ok/y	ALLOW (longest match wins)
+RB-06	User-agent: webfilter-client\nDisallow: /\n\nUser-agent: *\nAllow: /	webfilter-client	/a	DISALLOW (specific group wins)
+RB-07	User-agent: *\nDisallow:	webfilter-client	/anything	ALLOW (empty Disallow)
+RB-08	User-agent: *\nCrawl-delay: 5\nDisallow: /x	webfilter-client	/y	ALLOW and delay >= 5 s
+RB-09	USER-AGENT: *\nDISALLOW: /Caps	webfilter-client	/Caps	DISALLOW (directive names case-insensitive; paths case-sensitive)
+RB-10	# comment only	webfilter-client	/a	ALLOW
+RB-11	\xef\xbb\xbfUser-agent: *\r\nDisallow: /bom\r\n	webfilter-client	/bom	DISALLOW (BOM and CRLF tolerated)
+RB-12	garbage\x00bytes\nUser-agent: *\nDisallow: /g	webfilter-client	/g	DISALLOW (invalid lines ignored)
+RB-13	HTTP 404 for robots.txt	webfilter-client	/a	ALLOW
+RB-14	HTTP 503 for robots.txt	webfilter-client	/a	DISALLOW (for this run)
+RB-15	file larger than 512 KiB	webfilter-client	/a	parsed only up to 512 KiB, no panic

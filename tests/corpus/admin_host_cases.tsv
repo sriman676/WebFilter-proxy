@@ -1,0 +1,21 @@
+# Admin Host-header corpus (SPEC_EXT_OPS O1, R-14). Default allowed_hosts: 127.0.0.1:9090, localhost:9090, [::1]:9090. Columns: id<TAB>host_header<TAB>route<TAB>expected_status
+AH-01	127.0.0.1:9090	/healthz	200
+AH-02	localhost:9090	/healthz	200
+AH-03	LOCALHOST:9090	/healthz	200 (case-insensitive host)
+AH-04	[::1]:9090	/healthz	200
+AH-05	localhost	/healthz	421 (missing port)
+AH-06	localhost.:9090	/healthz	421
+AH-07	127.0.0.1.attacker.test:9090	/healthz	421
+AH-08	attacker.test	/healthz	421
+AH-09	127.0.0.1:9091	/healthz	421
+AH-10	[::1]	/healthz	421
+AH-11	(absent, HTTP/1.1)	/healthz	400
+AH-12	two Host headers	/healthz	400
+AH-13	127.0.0.1:9090@attacker.test	/healthz	421
+AH-14	0.0.0.0:9090	/healthz	421
+AH-15	2130706433:9090	/healthz	421
+AH-16	attacker.test	/api/v1/stats	421 (before authentication)
+AH-17	attacker.test	/ui/	421
+AH-18	attacker.test	/metrics	421
+AH-19	localhost:9090	/api/v1/stats (no token)	401
+AH-20	localhost:9090	/api/v1/stats (valid token)	200

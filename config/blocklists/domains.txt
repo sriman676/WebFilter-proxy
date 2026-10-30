@@ -1,0 +1,5 @@
+# One domain per line. Matches the domain and all subdomains.
+# Safe test entries:
+blocked-test.example
+malware-test.invalid
+ads.example.net
