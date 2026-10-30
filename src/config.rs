@@ -100,6 +100,8 @@ pub struct Config {
     pub tls: TlsConfig,
     /// Proxy authentication (D-14); required for non-loopback listen.
     pub proxy_auth: Option<ProxyAuthConfig>,
+    /// HTTP/1 parser options (A-25).
+    pub http: HttpConfig,
     /// HTTP/2 flood limits (D-45).
     pub http2: Http2Config,
     /// Transparent mode (D-41..D-43).
@@ -143,6 +145,7 @@ impl Default for Config {
             rules: RuleConfig::default(),
             tls: TlsConfig::default(),
             proxy_auth: None,
+            http: HttpConfig::default(),
             http2: Http2Config::default(),
             transparent: TransparentConfig::default(),
             admin: AdminConfig::default(),
@@ -423,6 +426,15 @@ pub struct ProxyAuthConfig {
     pub username: String,
     /// argon2id PHC hash from `webfilter-proxy hash-password`.
     pub password_hash: Redacted<String>,
+}
+
+/// `[http]` HTTP/1 parser options (A-25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HttpConfig {
+    /// Tolerate lowercase methods and chunk extensions. Never relaxes CL/TE, duplicate-header,
+    /// bare CR/LF, NUL, obs-fold or spacing rules (anti-smuggling).
+    pub compat: bool,
 }
 
 /// `[http2]` flood limits; tunable, never disabled (D-45).
