@@ -334,6 +334,11 @@ pub struct IpSet {
 /// Parse one `ip_blocklist.txt` entry (address or CIDR; host bits are cleared, mapped IPv6 folded).
 pub fn parse_ip_entry(entry: &str) -> Result<IpNet, String> {
     let net = match entry.parse::<IpNet>() {
+        // Mapped IPv6 networks (`::ffff:a.b.c.d/104`) fold to IPv4, like lookups (PF-1-08).
+        Ok(IpNet::V6(v6)) => match (v6.prefix_len().checked_sub(96), v6.addr().to_ipv4_mapped()) {
+            (Some(len), Some(v4)) => IpNet::new(IpAddr::V4(v4), len).map_err(|e| e.to_string())?,
+            _ => IpNet::V6(v6),
+        },
         Ok(net) => net,
         Err(_) => {
             let ip: IpAddr = entry.parse().map_err(|_| format!("invalid IP or CIDR {entry:?}"))?;
@@ -496,17 +501,16 @@ impl BlocklistHandle {
 
     /// Reload now (SIGHUP); on failure the previous lists stay active.
     pub fn reload(&self) -> ReloadOutcome {
-        let stamp = Self::stamp_of(&self.cfg);
+        // Holding the stamp lock for the whole load serializes reloads (SIGHUP vs watcher), so an
+        // older load can never overwrite a newer one. A failed load is not retried until changed.
+        let mut stamp = self.stamp.lock().unwrap_or_else(|e| e.into_inner());
+        *stamp = Self::stamp_of(&self.cfg);
         match Blocklists::load(&self.cfg) {
             Ok((lists, report)) => {
                 self.current.store(Arc::new(lists));
-                *self.stamp.lock().unwrap_or_else(|e| e.into_inner()) = stamp;
                 ReloadOutcome::Reloaded(report)
             }
-            Err(e) => {
-                *self.stamp.lock().unwrap_or_else(|e| e.into_inner()) = stamp; // don't retry until changed
-                ReloadOutcome::Failed(e.to_string())
-            }
+            Err(e) => ReloadOutcome::Failed(e.to_string()),
         }
     }
 

@@ -319,12 +319,12 @@ proptest! {
     /// to itself.
     #[test]
     fn p06_forwarded_target_is_normalized(path in "(/(\\.|\\.\\.|%2e|%41|%2f|[a-z]{1,4})){1,6}") {
-        if let Ok(t) = canonicalize(&format!("http://good.test{path}"), TargetContext::PlainAbsolute) {
-            let line = t.origin_form();
-            prop_assert!(!line.split('/').any(|s| s == "." || s == ".."));
-            prop_assert!(!line.contains("%2e") && !line.contains("%41") && !line.contains("%2f"));
-            let again = canonicalize(&format!("http://good.test{line}"), TargetContext::PlainAbsolute).unwrap();
-            prop_assert_eq!(again.origin_form(), line);
-        }
+        let t = canonicalize(&format!("http://good.test{path}"), TargetContext::PlainAbsolute);
+        prop_assert!(t.is_ok(), "valid path rejected: {path}"); // never vacuous (PF-1-12)
+        let line = t.unwrap().origin_form();
+        prop_assert!(!line.split('/').any(|s| s == "." || s == ".."));
+        prop_assert!(!line.contains("%2e") && !line.contains("%41") && !line.contains("%2f"));
+        let again = canonicalize(&format!("http://good.test{line}"), TargetContext::PlainAbsolute).unwrap();
+        prop_assert_eq!(again.origin_form(), line);
     }
 }

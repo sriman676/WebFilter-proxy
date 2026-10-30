@@ -6,13 +6,16 @@ import json, sys
 CORE = ("blocklist.rs", "normalize.rs", "policy.rs", "filter.rs", "logger.rs", "naming.rs")
 data = json.load(sys.stdin)["data"][0]
 errs = []
+seen = set()
 for f in data["files"]:
     name = f["filename"].replace("\\", "/").rsplit("/", 1)[-1]
     pct = f["summary"]["lines"]["percent"]
     if name in CORE:
+        seen.add(name)
         print(f"{name:14} {pct:6.2f}%")
         if pct < 85:
             errs.append(f"{name} {pct:.2f}% < 85%")
+errs += [f"{m} missing from the coverage report" for m in CORE if m not in seen]
 total = data["totals"]["lines"]["percent"]
 print(f"{'TOTAL':14} {total:6.2f}%")
 if total < 70:
