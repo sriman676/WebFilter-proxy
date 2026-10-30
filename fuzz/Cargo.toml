@@ -1,0 +1,25 @@
+# cargo-fuzz package (D-03). Built only with the dated nightly in docs/ENVIRONMENT.md.
+# `libfuzzer-sys` is added by scripts/bootstrap_deps.sh (`cargo add`), never written from memory.
+[package]
+name = "webfilter-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+webfilter = { path = ".." }
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+# Separate workspace so the main package never builds fuzz code.
+[workspace]
+members = ["."]

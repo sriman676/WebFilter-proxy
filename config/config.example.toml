@@ -1,0 +1,161 @@
+# Every key shown with its default. Unknown keys are an error. Paths are relative to this file.
+mode = "enforce"                 # enforce | monitor
+listen = "127.0.0.1:8080"        # non-loopback requires [proxy_auth]
+worker_threads = 0               # 0 = number of CPUs
+on_error = "allow"               # allow | block  (filter internal error behaviour; always logged)
+log_query_values = false
+upstream_keepalive = false       # D-07: same client connection + same authority only
+block_non_tls_connect = true
+
+[limits]
+max_connections = 1024
+max_connections_per_ip = 128
+max_head_bytes = 65536
+max_headers = 100
+max_uri_bytes = 8192
+
+[timeouts]                       # seconds
+client_head_read = 15
+client_keepalive_idle = 60
+upstream_connect = 10
+upstream_response_header = 30
+upstream_body_idle = 60
+tunnel_idle = 300
+tls_handshake = 10
+shutdown_drain = 10
+
+[ports]
+http_allowed = [80, 8000, 8080, 8888]    # or "any" (tests only)
+connect_allowed = [443, 8443]            # or "any" (tests only)
+
+[destination]
+deny_private_ranges = true       # hardened default for shipped config; set false for local-origin lab tests
+
+[logging]
+dir = "../logs"                  # relative to THIS file -> repo-root logs/
+max_bytes = 52428800
+backup_count = 10
+queue_capacity = 10000
+
+[blocklists]
+domains = "blocklists/domains.txt"
+url_patterns = "blocklists/url_patterns.txt"
+ip_blocklist = "blocklists/ip_blocklist.txt"
+reload_interval_secs = 5
+
+[rules]
+allow_domains = []
+blocked_extensions = [".exe", ".scr", ".bat", ".ps1"]
+blocked_content_types = ["application/x-msdownload"]
+
+[tls]
+intercept = false
+ca_dir = "~/.webfilter"
+passthrough_domains = ["*.bank.example", "update.microsoft.com"]
+upstream_ca_bundle = ""          # optional extra roots (PEM); verification is always on
+
+# Optional; REQUIRED when `listen` is not loopback
+# [proxy_auth]
+# username = "analyst"
+# password_hash = "$argon2id$..."   # from: webfilter-proxy hash-password
+
+[http2]                          # Phase 6, intercepted TLS only (D-40, D-45); limits may be tuned, never disabled
+max_concurrent_streams = 100
+max_header_list_size = 65536
+max_frame_size = 16384
+initial_stream_window = 1048576
+initial_conn_window = 4194304
+max_continuation_frames = 16
+reset_limit = 100                # RST_STREAM per window (incl. resets we cause)
+control_frame_limit = 200        # SETTINGS/PING/PRIORITY/empty DATA/WINDOW_UPDATE(0) per window
+limit_window_secs = 10
+max_streams_per_connection = 10000
+stall_timeout_secs = 30
+
+[transparent]                    # Phase 7, Linux lab only (D-41..D-43)
+enabled = false
+acknowledge_lab_only = false     # must be true to start
+http_listen = "127.0.0.1:18880"
+tls_listen = "127.0.0.1:18443"
+host_verify = "strict"           # strict | relaxed
+no_sni_action = "block"          # block | ip_only
+ech_action = "block"             # block | ip_only
+orig_dst = "so_original_dst"     # so_original_dst | conntrack
+
+# ---------------- v1.1 features (all OFF by default; see docs/SPEC_EXT_*.md) ----------------
+[[profiles]]
+name = "default"
+scan_downloads = false
+access_requests = false
+# feeds = ["urlhaus"]               # names of enabled [[feeds]] to apply
+[profiles.rate]
+requests_per_sec = 50
+burst = 100
+max_concurrent_connections = 64
+max_inflight_requests = 128
+max_tunnels = 32
+down_bytes_per_sec = 0              # 0 = unlimited
+up_bytes_per_sec = 0
+daily_quota_bytes = 0               # 0 = off
+
+# [[clients]]
+# cidr = "10.0.0.0/24"
+# profile = "default"
+# [[users]]
+# username = "analyst"
+# password_hash = "$argon2id$..."
+# profile = "default"
+
+# [[feeds]]                         # verify the feed's terms of use first (docs/SPEC_EXT_POLICY.md P3)
+# name = "urlhaus"
+# enabled = false
+# url = "https://urlhaus.abuse.ch/downloads/text/"
+# format = "urls_text"
+# refresh_secs = 3600
+# max_bytes = 52428800
+# max_entries = 2000000
+# auth_header_file = ""
+
+[feeds_global]
+protected_domains = ["localhost", "webfilter.local"]
+
+[scan]
+enabled = false
+mode = "detect"                     # detect | block
+max_bytes = 26214400
+max_concurrent = 8
+temp_dir = "../state/scan_tmp"
+temp_quota_bytes = 1073741824
+unscannable_action = "allow"        # default becomes "block" when mode = "block"
+scanner_unavailable_action = "allow"
+extensions = [".exe", ".dll", ".msi", ".zip", ".jar", ".doc", ".docm", ".xls", ".xlsm", ".pdf", ".js", ".ps1", ".sh", ".apk"]
+content_types = ["application/x-msdownload", "application/octet-stream", "application/zip", "application/pdf"]
+magic = true
+hash_blocklist = "blocklists/hash_blocklist.txt"
+[scan.clamd]
+address = ""                        # e.g. "unix:/run/clamav/clamd.ctl" or "tcp:127.0.0.1:3310"
+timeout_secs = 30
+chunk_bytes = 65536
+[scan.yara]
+rules_dir = ""                      # requires the `yara` cargo feature
+timeout_secs = 10
+
+[admin]
+enabled = false
+listen = "127.0.0.1:9090"           # loopback only
+token_hash = ""                     # argon2id hash (webfilter-proxy hash-password)
+ui_enabled = true
+metrics_public = false
+max_body_bytes = 65536
+request_timeout_secs = 10
+max_connections = 64
+
+[access_requests]
+enabled = false
+virtual_host = "webfilter.local"
+default_ttl_secs = 14400
+max_ttl_secs = 86400
+per_client_per_hour = 3
+
+[state]
+dir = "../state"

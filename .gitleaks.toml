@@ -1,0 +1,7 @@
+# gitleaks: default rules; skip gitignored build output (compiled crates contain test-vector keys).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "build output, never committed"
+paths = ['''(^|/)target/''', '''(^|/)fuzz/target/''']

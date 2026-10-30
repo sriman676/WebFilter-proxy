@@ -1,0 +1,26 @@
+# Access-request corpus (SPEC_EXT_OPS O6, D-59). Columns: id<TAB>scenario<TAB>expected
+AR-01	valid CSRF, own recent blocked event, eligible reason domain_blocklist, within limits	201 request created (pending)
+AR-02	event_id belongs to another client	403, no record
+AR-03	event_id unknown or older than 15 minutes	403
+AR-04	CSRF missing or tampered	403
+AR-05	CSRF expired (>15 minutes)	403
+AR-06	blocked reason feed_domain	no form shown; direct POST rejected 403
+AR-07	blocked reason malware_detected	no form; POST rejected
+AR-08	blocked reason private_range	no form; POST rejected
+AR-09	event was monitor-mode would_block (action=allowed)	403
+AR-10	4th request within an hour from the same client	429
+AR-11	21st pending request for one client	429
+AR-12	body larger than 2 KiB	413
+AR-13	Content-Type other than application/x-www-form-urlencoded	415
+AR-14	justification longer than 500 chars	400
+AR-15	justification contains script tags	stored escaped; rendered inert in UI and TUI
+AR-16	GET /request	404 (only POST allowed)
+AR-17	POST http://WEBFILTER.LOCAL./request (case, trailing dot)	treated identically to AR-01 after canonicalization
+AR-18	POST to webfilter.local:8080 or via CONNECT without interception	not special; normal pipeline (blocked or DNS failure), never answered as the virtual host
+AR-19	POST with Content-Length and Transfer-Encoding both set	400 (SPEC R1) and never reaches the handler
+AR-20	approve with ttl 30 h	clamped to 24 h or rejected 400
+AR-21	approved temp allow used by a different client	still blocked
+AR-22	approved host also listed in a threat feed	still blocked (feed wins)
+AR-23	approved host resolves to a private IP	still blocked (safety policy)
+AR-24	temp allow after expiry	blocked again; temp_allow_expired event
+AR-25	restart with a tampered temp_allows.json (bad schema or past/huge TTL)	file rejected safely, allows ignored, system event, proxy starts

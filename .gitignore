@@ -1,0 +1,35 @@
+/target
+logs/*
+!logs/.gitkeep
+output/
+config/config.toml
+# keys, certificates, keystores (never commit; PF-0-01)
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.der
+*.jks
+*.token
+*.csr
+*.srl
+id_rsa*
+id_ecdsa*
+id_ed25519*
+*.log
+.env
+.env.*
+docs/pentest/**/raw/
+fuzz/artifacts/
+fuzz/target/
+fuzz/corpus/
+fuzz/coverage/
+state/
+feeds/
+# coverage artefacts
+*.profraw
+*.profdata
+lcov.info
+.claude/settings.local.json

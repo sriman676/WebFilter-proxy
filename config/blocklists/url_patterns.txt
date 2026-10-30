@@ -1,0 +1,4 @@
+# One regex per line, matched (case-insensitive) against the normalized full URL.
+/wp-admin/install\.php
+\.(php|asp)\?cmd=
+^https?://[^/]*\.example\.org/phish

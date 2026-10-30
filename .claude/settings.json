@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)", "Bash(just:*)", "Bash(rustup:*)",
+      "Bash(openssl:*)", "Bash(jq:*)", "Bash(python3 scripts/*)",
+      "Bash(curl http://127.0.0.1:*)", "Bash(curl -x http://127.0.0.1:*)", "Bash(curl --http2:*)",
+      "Bash(nc 127.0.0.1:*)", "Bash(ncat 127.0.0.1:*)", "Bash(socat:*)",
+      "Bash(oha:*)", "Bash(slowhttptest:*)", "Bash(h2spec:*)", "Bash(nghttp:*)", "Bash(h2load:*)",
+      "Bash(gitleaks:*)", "Bash(promtool:*)", "Bash(chromium:*)", "Bash(chromium-browser:*)", "Bash(firefox:*)", "Bash(sha256sum:*)", "Bash(docker run:*)", "Bash(docker ps:*)", "Bash(docker stop:*)", "Bash(docker compose:*)",
+      "Bash(sudo ./scripts/netns_lab.sh:*)", "Bash(sudo scripts/netns_lab.sh:*)",
+      "Bash(git status)", "Bash(git diff:*)", "Bash(git add:*)", "Bash(git commit:*)",
+      "Bash(git switch:*)", "Bash(git tag:*)"
+    ],
+    "deny": [
+      "Read(~/.webfilter/**)", "Read(.env)", "Read(**/*.key)",
+      "Bash(git push:*)", "Bash(rm -rf /*)"
+    ]
+  }
+}
