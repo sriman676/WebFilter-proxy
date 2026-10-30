@@ -38,9 +38,15 @@ pub fn now_timestamp() -> String {
     time::OffsetDateTime::now_utc().format(&format).unwrap_or_default()
 }
 
-/// Strip C0/C1 control characters (including ESC) and DEL; truncate to `max` chars with `…`.
+/// Characters that reorder or break displayed text: bidi controls and line/paragraph separators.
+fn is_display_control(c: char) -> bool {
+    matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')
+}
+
+/// Strip C0/C1 controls (including ESC), DEL, bidi controls and U+2028/2029; truncate to `max`
+/// chars with `…`.
 pub fn clean(s: &str, max: usize) -> String {
-    let filtered = s.chars().filter(|c| !c.is_control());
+    let filtered = s.chars().filter(|c| !c.is_control() && !is_display_control(*c));
     if s.chars().count() <= max {
         return filtered.collect();
     }
@@ -179,7 +185,8 @@ impl RequestEvent {
         ] {
             *s = clean(s, DEFAULT_CAP);
         }
-        self.url = clean(&self.url, 2048);
+        let url_without_query = self.url.split('?').next().unwrap_or(""); // never log query values (D-18)
+        self.url = clean(url_without_query, 2048);
         self.uri_path = clean(&self.uri_path, 2048);
         self.uri_query_keys.truncate(50);
         for k in &mut self.uri_query_keys {
@@ -499,8 +506,10 @@ impl Writer {
                 Ok(Msg::Line(target, line)) => self.write(target, &line),
                 Ok(Msg::Reopen) => self.files.iter_mut().for_each(|f| f.file = None),
                 Ok(Msg::Shutdown(ack)) => {
-                    while let Ok(Msg::Line(target, line)) = rx.try_recv() {
-                        self.write(target, &line);
+                    while let Ok(msg) = rx.try_recv() {
+                        if let Msg::Line(target, line) = msg {
+                            self.write(target, &line);
+                        }
                     }
                     self.report_drops();
                     let _ = ack.send(());
@@ -589,11 +598,12 @@ impl Stats {
             return;
         }
         self.blocked.fetch_add(1, Ordering::Relaxed);
+        let host = clean(host, 253);
         let mut top = self.top.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = top.get_mut(host) {
+        if let Some(n) = top.get_mut(&host) {
             *n += 1;
         } else if top.len() < MAX_TRACKED_HOSTS {
-            top.insert(clean(host, 253), 1);
+            top.insert(host, 1);
         }
     }
 
