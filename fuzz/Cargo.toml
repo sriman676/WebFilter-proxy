@@ -20,6 +20,27 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "normalize"
+path = "fuzz_targets/normalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blocklist_parse"
+path = "fuzz_targets/blocklist_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "naming"
+path = "fuzz_targets/naming.rs"
+test = false
+doc = false
+bench = false
+
 # Separate workspace so the main package never builds fuzz code.
 [workspace]
 members = ["."]

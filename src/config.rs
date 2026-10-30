@@ -640,7 +640,7 @@ impl Config {
             if auth.username.is_empty() || auth.username.contains(':') {
                 return Err(invalid("proxy_auth.username", "must be non-empty and contain no ':'"));
             }
-            if !auth.password_hash.0.starts_with("$argon2id$") {
+            if !crate::auth::is_argon2id_phc(&auth.password_hash.0) {
                 return Err(invalid(
                     "proxy_auth.password_hash",
                     "must be an argon2id PHC hash (webfilter-proxy hash-password)",
@@ -650,7 +650,7 @@ impl Config {
         if !self.admin.listen.ip().is_loopback() {
             return Err(invalid("admin.listen", "admin listener must be loopback (D-55)"));
         }
-        if self.admin.enabled && !self.admin.token_hash.0.starts_with("$argon2id$") {
+        if self.admin.enabled && !crate::auth::is_argon2id_phc(&self.admin.token_hash.0) {
             return Err(invalid(
                 "admin.token_hash",
                 "an argon2id hash is required when admin.enabled (D-55)",
