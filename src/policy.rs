@@ -1,0 +1,156 @@
+//! Destination and port policy (D-11, D-12): resolve once, validate every IP, never re-resolve.
+#![forbid(unsafe_code)]
+
+use std::future::Future;
+use std::io;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
+
+use crate::config::PortConfig;
+use crate::normalize::{NormalizedTarget, fold_ip};
+use crate::reason::Reason;
+
+/// Maximum resolved addresses considered per name.
+pub const MAX_RESOLVED: usize = 32;
+
+/// Plain HTTP request or CONNECT tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortKind {
+    /// Absolute-form HTTP request.
+    Http,
+    /// CONNECT.
+    Connect,
+}
+
+/// Port policy (D-12).
+pub fn check_port(kind: PortKind, port: u16, cfg: &PortConfig) -> Result<(), Reason> {
+    let set = match kind {
+        PortKind::Http => &cfg.http_allowed,
+        PortKind::Connect => &cfg.connect_allowed,
+    };
+    if set.allows(port) { Ok(()) } else { Err(Reason::PortNotAllowed) }
+}
+
+/// Always denied regardless of configuration: metadata endpoints and `0.0.0.0/8` (D-11).
+pub fn is_always_denied(ip: IpAddr) -> bool {
+    match fold_ip(ip) {
+        IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 0,
+        IpAddr::V6(v6) => v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
+    }
+}
+
+/// Loopback, RFC 1918, CGNAT, link-local, ULA, multicast, unspecified, broadcast (D-11).
+pub fn is_private(ip: IpAddr) -> bool {
+    match fold_ip(ip) {
+        IpAddr::V4(v4) => {
+            let cgnat = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64;
+            v4.is_loopback()
+                || v4.is_private()
+                || cgnat
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg0 & 0xffc0) == 0xfe80 // link-local
+                || (seg0 & 0xfe00) == 0xfc00 // ULA
+        }
+    }
+}
+
+/// Destination policy for resolved addresses.
+#[derive(Debug, Clone)]
+pub struct DestPolicy {
+    deny_private: bool,
+    own: Vec<SocketAddr>,
+}
+
+impl DestPolicy {
+    /// `own` = the proxy's listen addresses (loop detection).
+    pub fn new(deny_private: bool, own: Vec<SocketAddr>) -> Self {
+        Self { deny_private, own }
+    }
+
+    /// Check one destination address.
+    pub fn check_ip(&self, ip: IpAddr, port: u16) -> Result<(), Reason> {
+        let ip = fold_ip(ip);
+        let is_own = |a: &SocketAddr| {
+            let own_ip = fold_ip(a.ip());
+            a.port() == port
+                && (own_ip == ip
+                    || (own_ip.is_unspecified() && (ip.is_loopback() || ip.is_unspecified())))
+        };
+        if self.own.iter().any(is_own) {
+            return Err(Reason::LoopDetected);
+        }
+        if is_always_denied(ip) || (self.deny_private && is_private(ip)) {
+            return Err(Reason::PrivateRange);
+        }
+        Ok(())
+    }
+}
+
+/// Boxed future returned by [`Resolver::resolve`].
+pub type ResolveFuture<'a> = Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'a>>;
+
+/// Name resolution, injectable for tests (TEST_PLAN `TestResolver`).
+pub trait Resolver: Send + Sync {
+    /// Resolve `host` once.
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a>;
+}
+
+/// The system resolver (`getaddrinfo` via tokio).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemResolver;
+
+impl Resolver for SystemResolver {
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a> {
+        Box::pin(async move {
+            Ok(tokio::net::lookup_host((host, port)).await?.map(|a| a.ip()).collect())
+        })
+    }
+}
+
+/// Destination verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyVerdict {
+    /// All resolved addresses passed; connect to them in order, never re-resolve (D-11, D-38).
+    Allow(Vec<IpAddr>),
+    /// Denied.
+    Deny(Reason),
+}
+
+/// Resolve the target once and validate ALL addresses (one bad address denies the request).
+pub async fn check_destination(
+    t: &NormalizedTarget,
+    r: &dyn Resolver,
+    p: &DestPolicy,
+) -> PolicyVerdict {
+    let ips = match (t.host.ip(), t.host.domain()) {
+        (Some(ip), _) => vec![ip],
+        (None, Some(name)) => match r.resolve(name, t.port).await {
+            Ok(ips) => ips,
+            Err(_) => return PolicyVerdict::Deny(Reason::UpstreamError),
+        },
+        (None, None) => return PolicyVerdict::Deny(Reason::InvalidRequest),
+    };
+    let mut out: Vec<IpAddr> = Vec::new();
+    for ip in ips.into_iter().map(fold_ip) {
+        if let Err(reason) = p.check_ip(ip, t.port) {
+            return PolicyVerdict::Deny(reason);
+        }
+        if !out.contains(&ip) && out.len() < MAX_RESOLVED {
+            out.push(ip);
+        }
+    }
+    if out.is_empty() {
+        PolicyVerdict::Deny(Reason::UpstreamError)
+    } else {
+        PolicyVerdict::Allow(out)
+    }
+}

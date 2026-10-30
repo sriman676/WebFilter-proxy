@@ -337,3 +337,40 @@ fn pf_0_07_v11_placeholder_sections_redacted_in_debug() {
         parse_in(&lab, "[[users]]\nusername = \"u\"\npassword_hash = \"TOPSECRET\"\n").unwrap();
     assert!(!format!("{cfg:?}").contains("TOPSECRET"));
 }
+
+// ---- PT-1.5: config abuse -> clean error, never a panic ----
+
+#[test]
+fn pt_1_5_duplicate_nested_and_wrongly_typed_keys_rejected() {
+    let lab = Lab::new();
+    parse_err(parse_in(&lab, "mode = \"enforce\"\nmode = \"monitor\"\n"));
+    parse_err(parse_in(&lab, "[limits]\n[limits]\n"));
+    parse_err(parse_in(&lab, &format!("x = {}{}\n", "[".repeat(5000), "]".repeat(5000))));
+    parse_err(parse_in(&lab, &format!("{}=1\n", "a.".repeat(5000))));
+    parse_err(parse_in(&lab, "worker_threads = \"many\"\n"));
+    parse_err(parse_in(&lab, "worker_threads = -1\n"));
+    parse_err(parse_in(&lab, "[limits]\nmax_connections = 1e9\n"));
+}
+
+#[test]
+fn pt_1_5_traversal_and_symlinked_paths_resolve_without_panic() {
+    let lab = Lab::new();
+    let r =
+        parse_in(&lab, "[blocklists]\ndomains = \"../../../../../../etc/shadow-does-not-exist\"\n");
+    assert_eq!(invalid_key(r), "blocklists.domains");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            lab.path().join("blocklists/domains.txt"),
+            lab.path().join("link.txt"),
+        )
+        .unwrap();
+        parse_in(&lab, "[blocklists]\ndomains = \"link.txt\"\n").unwrap(); // operator-chosen symlink is allowed
+        std::os::unix::fs::symlink(lab.path().join("nowhere"), lab.path().join("dangling.txt"))
+            .unwrap();
+        assert_eq!(
+            invalid_key(parse_in(&lab, "[blocklists]\ndomains = \"dangling.txt\"\n")),
+            "blocklists.domains"
+        );
+    }
+}

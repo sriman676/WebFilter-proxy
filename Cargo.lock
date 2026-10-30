@@ -1929,6 +1929,7 @@ dependencies = [
  "proptest",
  "rcgen",
  "regex",
+ "regex-automata",
  "rustls",
  "rustls-pki-types",
  "serde",
