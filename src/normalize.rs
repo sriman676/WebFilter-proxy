@@ -153,6 +153,9 @@ pub enum TargetError {
     /// Userinfo in the authority (403 `userinfo_in_url`).
     #[error("userinfo in URL")]
     UserInfo,
+    /// Inside a tunnel, an absolute-form target that is not the CONNECT authority (403, D-22).
+    #[error("target does not match the CONNECT authority")]
+    HostMismatch,
 }
 
 impl TargetError {
@@ -162,6 +165,7 @@ impl TargetError {
             TargetError::Invalid(_) => Reason::InvalidRequest,
             TargetError::ParserDifferential => Reason::ParserDifferential,
             TargetError::UserInfo => Reason::UserinfoInUrl,
+            TargetError::HostMismatch => Reason::HostMismatch,
         }
     }
 }
@@ -192,16 +196,21 @@ pub fn canonicalize(raw: &str, ctx: TargetContext<'_>) -> Result<NormalizedTarge
             parse_absolute(&format!("https://{raw}/"), true)
         }
         TargetContext::InterceptedOrigin { connect_host, port } => {
-            if !raw.starts_with('/') {
-                check_userinfo(raw)?;
-                return parse_absolute(raw, false);
-            }
             let host = if connect_host.contains(':') {
                 format!("[{connect_host}]")
             } else {
-                connect_host.to_owned()
+                connect_host.to_ascii_lowercase()
             };
-            parse_absolute(&format!("https://{host}:{port}{raw}"), false)
+            if raw.starts_with('/') {
+                return parse_absolute(&format!("https://{host}:{port}{raw}"), false);
+            }
+            // Absolute-form inside a tunnel must name exactly the CONNECT authority (PF-1-03).
+            check_userinfo(raw)?;
+            let t = parse_absolute(raw, false)?;
+            if t.scheme != Scheme::Https || t.host.to_string() != host || t.port != port {
+                return Err(TargetError::HostMismatch);
+            }
+            Ok(t)
         }
     }
 }
@@ -269,19 +278,21 @@ fn parse_absolute(s: &str, require_port: bool) -> Result<NormalizedTarget, Targe
     let authority =
         if port == scheme.default_port() { host.to_string() } else { format!("{host}:{port}") };
     let prefix = format!("{}://{authority}", scheme.as_str());
-    let pq = match &query {
-        Some(q) => format!("{path}?{q}"),
-        None => path.clone(),
+    // Decoded views resolve dot segments that decoding creates (`%2F..%2F`), as origins do (PF-1-02).
+    let view = |p: &str, q: Option<&str>| {
+        let p = if p.starts_with('/') { remove_dot_segments(p) } else { p.to_owned() };
+        format!("{prefix}{p}{}", q.map(|q| format!("?{q}")).unwrap_or_default())
     };
-    let once = decode_once(&pq);
-    let twice = decode_once(&once);
+    let (path1, query1) = (decode_once(&path), query.as_deref().map(decode_once));
+    let (path2, query2) = (decode_once(&path1), query1.as_deref().map(decode_once));
+    let url_norm = view(&path, query.as_deref());
     Ok(NormalizedTarget {
         scheme,
         host,
         port,
-        suspicious_encoding: twice != once,
-        url_norm: format!("{prefix}{pq}"),
-        views: [format!("{prefix}{pq}"), format!("{prefix}{once}"), format!("{prefix}{twice}")],
+        suspicious_encoding: path2 != path1 || query2 != query1,
+        views: [url_norm.clone(), view(&path1, query1.as_deref()), view(&path2, query2.as_deref())],
+        url_norm,
         path,
         query,
     })

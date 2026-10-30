@@ -7,6 +7,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -130,7 +131,10 @@ pub fn output_filename(original: &str) -> String {
 pub fn write_unique(out_dir: &Path, name: &str, data: impl Read, max: u64) -> io::Result<PathBuf> {
     let dir = fs::canonicalize(out_dir)?;
     let stem = name.strip_suffix(".html").unwrap_or(name);
-    let temp = dir.join(format!(".{stem}.part"));
+    // Unique temp name: a stale or concurrent `.part` never blocks or clobbers another writer.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nonce = format!("{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let temp = dir.join(format!(".{stem}.{nonce}.part"));
     let result = write_temp(&temp, data, max).and_then(|()| link_unique(&dir, stem, &temp));
     let _ = fs::remove_file(&temp);
     result

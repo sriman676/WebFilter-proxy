@@ -97,22 +97,29 @@ impl Decision {
     }
 }
 
-/// `host` equals an `allow_domains` entry or is a subdomain of it.
+/// `allow_domains` match with the domains.txt forms: `x.com` = apex + subdomains, `*.x.com` =
+/// subdomains only, `=x.com` = exact. IP hosts match only an identical entry (PF-1-09).
 fn allowlisted(host: &Host, allow: &[String]) -> bool {
-    let host = host.to_string();
+    let host_str = host.to_string();
     allow.iter().any(|e| {
         let e = e.trim().trim_end_matches('.').to_ascii_lowercase();
-        let e = e.strip_prefix("*.").unwrap_or(&e);
-        host == e || host.strip_suffix(e).is_some_and(|p| p.ends_with('.'))
+        let is_sub = |base: &str| host_str.strip_suffix(base).is_some_and(|p| p.ends_with('.'));
+        match (host, e.strip_prefix("*."), e.strip_prefix('=')) {
+            (Host::Domain(_), Some(base), _) => is_sub(base),
+            (Host::Domain(_), _, Some(exact)) => host_str == exact,
+            (Host::Domain(_), None, None) => host_str == e || is_sub(&e),
+            _ => host_str == e || host.ip().is_some_and(|ip| ip.to_string() == e),
+        }
     })
 }
 
-/// Final path segment ends with a blocked extension (case-insensitive; query already separate).
+/// Final path segment (trailing dots ignored, as Windows does) ends with a blocked extension;
+/// empty entries never match (PF-1-10).
 fn blocked_extension<'r>(path: &str, rules: &'r RuleConfig) -> Option<&'r str> {
-    let last = path.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+    let last = path.rsplit('/').next().unwrap_or("").trim_end_matches('.').to_ascii_lowercase();
     rules.blocked_extensions.iter().map(String::as_str).find(|ext| {
-        let ext = ext.to_ascii_lowercase();
-        last.len() > ext.len() && last.ends_with(&ext)
+        let ext = ext.trim().to_ascii_lowercase();
+        ext.len() > 1 && last.len() > ext.len() && last.ends_with(&ext)
     })
 }
 
