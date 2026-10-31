@@ -162,6 +162,10 @@ pub struct ProxyDeps {
     pub limits: Limits,
     /// Block page.
     pub block_page: BlockPage,
+    /// Leaf certificates when interception is on (SPEC 4.9).
+    pub leaves: Option<Arc<crate::tls::LeafCache>>,
+    /// Upstream TLS: verification always on (D-20).
+    pub upstream_tls: Arc<rustls::ClientConfig>,
     auth: Option<ProxyAuth>,
     per_ip: Mutex<HashMap<IpAddr, usize>>,
     shutdown: watch::Receiver<bool>,
@@ -268,6 +272,9 @@ pub async fn start(
     let lists = Arc::new(lists);
     let logger = Arc::new(EventLogger::start(&cfg.logging)?);
     let sys = logger.system();
+    let upstream_tls = crate::tls::upstream_client_config(&extra_roots(&cfg))
+        .map_err(|e| invalid(e.to_string()))?;
+    let leaves = if cfg.tls.intercept { Some(Arc::new(load_ca(&cfg, &sys)?)) } else { None };
     let listener = TcpListener::bind(cfg.listen).await?;
     let local_addr = listener.local_addr()?;
     let (tx, rx) = watch::channel(false);
@@ -282,6 +289,8 @@ pub async fn start(
         cfg: Arc::new(cfg),
         logger,
         block_page,
+        leaves,
+        upstream_tls,
         auth,
         per_ip: Mutex::new(HashMap::new()),
         shutdown: rx,
@@ -306,6 +315,33 @@ pub async fn start(
         accept,
         background: vec![watcher, stats_task],
     })
+}
+
+fn extra_roots(cfg: &Config) -> Vec<std::path::PathBuf> {
+    let bundle = &cfg.tls.upstream_ca_bundle;
+    if bundle.as_os_str().is_empty() { Vec::new() } else { vec![bundle.clone()] }
+}
+
+/// Load the CA from `tls.ca_dir`, generating it on first run (SPEC 4.9); unsafe key files refuse
+/// start (D-19).
+fn load_ca(cfg: &Config, sys: &SystemLog) -> std::io::Result<crate::tls::LeafCache> {
+    let dir = &cfg.tls.ca_dir;
+    let (_, key_path) = crate::tls::CaStore::paths(dir);
+    let (store, kind) = if key_path.exists() {
+        (crate::tls::CaStore::load(dir), SysEvent::CaLoaded)
+    } else {
+        (crate::tls::CaStore::generate(dir), SysEvent::CaGenerated)
+    };
+    match store {
+        Ok(ca) => {
+            sys.event(kind, serde_json::json!({ "dir": dir.display().to_string() }));
+            Ok(crate::tls::LeafCache::new(ca))
+        }
+        Err(e) => {
+            sys.event(SysEvent::CaPermissionError, serde_json::json!({ "error": e.to_string() }));
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))
+        }
+    }
 }
 
 /// One stats line per window (SPEC 4.14).
@@ -346,7 +382,7 @@ async fn accept_loop(listener: TcpListener, deps: Arc<ProxyDeps>) {
             };
             // Panic isolation: a panic in one connection never affects others (SPEC 9).
             let served =
-                AssertUnwindSafe(pipeline::serve_connection(stream, peer, Arc::clone(&deps)))
+                AssertUnwindSafe(pipeline::serve_connection(stream, peer, Arc::clone(&deps), None))
                     .catch_unwind()
                     .await;
             if served.is_err() {

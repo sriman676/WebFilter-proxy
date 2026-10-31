@@ -15,3 +15,4 @@ pub mod policy;
 pub mod proxy;
 pub mod reason;
 pub mod schedule;
+pub mod tls;

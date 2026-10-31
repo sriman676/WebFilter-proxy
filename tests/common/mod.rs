@@ -159,12 +159,16 @@ async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
     if let Some(i) = interim(&buf[..head_end]) {
         s.write_all(&i).await.ok()?;
     }
-    let need_end = |b: &[u8]| -> Option<usize> {
+    // Only scan bytes not yet searched (keeps large chunked bodies linear).
+    let mut scanned = head_end;
+    let mut need_end = |b: &[u8]| -> Option<usize> {
         if let Some(cl) = head.lines().find_map(|l| l.strip_prefix("content-length:")) {
             let n: usize = cl.trim().parse().ok()?;
             (b.len() >= head_end + n).then_some(head_end + n)
         } else if head.contains("transfer-encoding: chunked") {
-            find(&b[head_end..], b"0\r\n\r\n").map(|i| head_end + i + 5)
+            let from = scanned.saturating_sub(4).max(head_end);
+            scanned = b.len();
+            find(&b[from..], b"0\r\n\r\n").map(|i| from + i + 5)
         } else {
             Some(head_end)
         }

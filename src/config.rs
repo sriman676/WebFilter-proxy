@@ -690,8 +690,12 @@ impl Config {
                 }
             }
         }
-        if self.tls.intercept {
-            self.tls.ca_dir = r("tls.ca_dir", &self.tls.ca_dir)?;
+        // Resolved whenever possible (`ca generate/export`); an unresolvable `~` (no HOME) is an
+        // error only when interception needs the CA (PF-0-04).
+        match r("tls.ca_dir", &self.tls.ca_dir) {
+            Ok(dir) => self.tls.ca_dir = dir,
+            Err(e) if self.tls.intercept => return Err(e),
+            Err(_) => {}
         }
         if !self.block_page.template.as_os_str().is_empty() {
             self.block_page.template = r("block_page.template", &self.block_page.template)?;

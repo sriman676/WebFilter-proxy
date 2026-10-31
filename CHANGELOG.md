@@ -2,6 +2,14 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-4-complete] - 2026-10-31 - Phase 4: TLS interception (pentest in the final run, A-29)
+### Added
+- `tls` module: CA store (`ca generate|export`, safe key loading A-33), P-256 leaf minting with cache, ClientHello
+  peek (SNI/ALPN/ECH), intercepted tunnels serving filtered inner requests, passthrough domains, always-verified
+  upstream TLS (502 `upstream_cert_invalid`), `block_non_tls_connect`. Fuzz F-10 `client_hello`. README CA steps (Firefox only).
+### Fixed
+- PF-0-13: CA key checks done on the opened handle (symlink/owner/mode, TOCTOU).
+
 ## [phase-3-complete] - 2026-10-31 - Phase 3: client (M1 complete; pentest in the final run, A-29)
 ### Added
 - `webfilter-client` (hyper 1.x, D-25/D-26): explicit proxy, manual CONNECT with block detection, always-verified TLS

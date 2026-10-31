@@ -79,3 +79,20 @@ fn hash_password_roundtrip() {
     assert!(webfilter::auth::verify_password(hash.trim(), b"s3cret"));
     assert_eq!(proxy(&["hash-password"], "").status.code(), Some(1), "empty password refused");
 }
+
+#[test]
+fn e35_ca_generate_export_and_no_overwrite() {
+    let lab = Lab::new();
+    let ca_dir = lab.path().join("ca");
+    let cfg = lab.write_config(&format!("[tls]\nca_dir = \"{}\"\n", ca_dir.display()));
+    let cfg = cfg.to_str().unwrap();
+    assert_eq!(proxy(&["--config", cfg, "ca", "generate"], "").status.code(), Some(0));
+    let export = proxy(&["--config", cfg, "ca", "export"], "");
+    let pem = String::from_utf8(export.stdout).unwrap();
+    assert!(pem.starts_with("-----BEGIN CERTIFICATE-----") && !pem.contains("PRIVATE"), "{pem}");
+    assert_eq!(
+        proxy(&["--config", cfg, "ca", "generate"], "").status.code(),
+        Some(1),
+        "never overwrites"
+    );
+}

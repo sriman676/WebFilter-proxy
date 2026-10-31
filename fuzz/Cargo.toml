@@ -77,6 +77,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "client_hello"
+path = "fuzz_targets/client_hello.rs"
+test = false
+doc = false
+bench = false
+
 # Separate workspace so the main package never builds fuzz code.
 [workspace]
 members = ["."]

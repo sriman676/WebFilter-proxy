@@ -50,6 +50,36 @@ enum Command {
     },
     /// Read a password from stdin and print its argon2id hash for the config.
     HashPassword,
+    /// Local CA for TLS interception (SPEC 4.9).
+    Ca {
+        #[command(subcommand)]
+        command: CaCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CaCommand {
+    /// Create the CA in `tls.ca_dir` (never overwrites an existing one).
+    Generate,
+    /// Print the public CA certificate (PEM) to import into a browser (manual, D-30).
+    Export,
+}
+
+fn ca(cfg: &Config, command: &CaCommand) -> ExitCode {
+    let dir = &cfg.tls.ca_dir;
+    let result = match command {
+        CaCommand::Generate => webfilter::tls::CaStore::generate(dir).map(|_| {
+            eprintln!("CA created in {} (ca.key is 0600; never share or commit it)", dir.display());
+        }),
+        CaCommand::Export => webfilter::tls::CaStore::load(dir).map(|ca| print!("{}", ca.cert_pem)),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -183,6 +213,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match &cli.command {
         Some(Command::HashPassword) => hash_password(),
+        Some(Command::Ca { command }) => load(&cli).map_or_else(|code| code, |c| ca(&c, command)),
         Some(Command::CheckConfig) => match load(&cli) {
             Ok(c) => {
                 println!("config OK: {} (listen {})", cli.config.display(), c.listen);
