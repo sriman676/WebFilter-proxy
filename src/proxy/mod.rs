@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 pub mod connect;
+pub mod h2;
+pub mod h2guard;
 pub mod http1;
 pub mod io;
 pub mod pipeline;

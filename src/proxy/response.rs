@@ -140,7 +140,21 @@ pub fn status_text(status: u16) -> &'static str {
     }
 }
 
-/// A complete response with the SPEC 4.7 safety headers; always `Connection: close`.
+/// The SPEC 4.7 safety headers of every proxy-generated page, HTTP/1 and HTTP/2 (H11).
+pub fn page_headers(status: u16, reason: Reason, event_id: &str) -> [(&'static str, String); 7] {
+    let action = if status == 403 { "blocked" } else { "error" };
+    [
+        ("content-type", "text/html; charset=utf-8".into()),
+        ("x-webfilter-action", action.into()),
+        ("x-webfilter-event-id", event_id.into()),
+        ("x-webfilter-reason", reason.as_str().into()),
+        ("cache-control", "no-store".into()),
+        ("x-content-type-options", "nosniff".into()),
+        ("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'".into()),
+    ]
+}
+
+/// A complete HTTP/1.1 response with the safety headers; always `Connection: close`.
 pub fn page(
     status: u16,
     reason: Reason,
@@ -148,17 +162,10 @@ pub fn page(
     html: &str,
     extra_headers: &[(&str, String)],
 ) -> Vec<u8> {
-    let action = if status == 403 { "blocked" } else { "error" };
-    let mut head = format!(
-        "HTTP/1.1 {status} {}\r\ncontent-type: text/html; charset=utf-8\r\nx-webfilter-action: {action}\r\n\
-x-webfilter-event-id: {event_id}\r\nx-webfilter-reason: {}\r\ncache-control: no-store\r\n\
-x-content-type-options: nosniff\r\ncontent-security-policy: default-src 'none'; style-src 'unsafe-inline'\r\n\
-content-length: {}\r\nconnection: close\r\n",
-        status_text(status),
-        reason.as_str(),
-        html.len()
-    );
-    for (name, value) in extra_headers {
+    let mut head = format!("HTTP/1.1 {status} {}\r\n", status_text(status));
+    let framing = [("content-length", html.len().to_string()), ("connection", "close".into())];
+    let fixed = page_headers(status, reason, event_id);
+    for (name, value) in fixed.iter().chain(&framing).chain(extra_headers) {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
@@ -174,12 +181,16 @@ pub fn error_page(
     event_id: &str,
     extra_headers: &[(&str, String)],
 ) -> Vec<u8> {
-    let html = format!(
+    page(status, reason, event_id, &error_html(status, reason, event_id), extra_headers)
+}
+
+/// Body of the generic error page.
+pub fn error_html(status: u16, reason: Reason, event_id: &str) -> String {
+    format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{status}</title></head><body><h1>{status} {}</h1>\
 <p>Reason: <code>{}</code></p><p>Event id: <code>{}</code></p></body></html>",
         status_text(status),
         reason.as_str(),
         html_escape(event_id)
-    );
-    page(status, reason, event_id, &html, extra_headers)
+    )
 }

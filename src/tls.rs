@@ -230,8 +230,24 @@ impl LeafCache {
         &self.ca.cert_pem
     }
 
-    /// TLS 1.2/1.3 server config presenting a leaf for `host`; ALPN `http/1.1` only (before Phase 6).
-    pub fn server_config_for(&self, host: &Host) -> Result<Arc<rustls::ServerConfig>, TlsError> {
+    /// TLS 1.2/1.3 server config presenting a leaf for `host` and offering exactly `alpn`
+    /// (the protocol the origin selected, D-40; empty = no ALPN).
+    pub fn server_config_for(
+        &self,
+        host: &Host,
+        alpn: Vec<Vec<u8>>,
+    ) -> Result<Arc<rustls::ServerConfig>, TlsError> {
+        let base = self.leaf_config(host)?;
+        if base.alpn_protocols == alpn {
+            return Ok(base);
+        }
+        let mut config = (*base).clone();
+        config.alpn_protocols = alpn;
+        Ok(Arc::new(config))
+    }
+
+    /// The cached leaf config (ALPN `http/1.1`).
+    fn leaf_config(&self, host: &Host) -> Result<Arc<rustls::ServerConfig>, TlsError> {
         let key = host.to_string();
         if let Some(c) = self.cache.get(&key) {
             return Ok(c);

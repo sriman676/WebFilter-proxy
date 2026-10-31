@@ -111,7 +111,7 @@ fn client_wants_keep_alive(h: &RequestHead) -> bool {
 }
 
 /// The `Host` value equals the target authority (case-insensitive, default port normalized).
-fn host_equals(host: &[u8], t: &NormalizedTarget) -> bool {
+pub(crate) fn host_equals(host: &[u8], t: &NormalizedTarget) -> bool {
     let host = String::from_utf8_lossy(host).to_ascii_lowercase();
     let default = format!(":{}", t.scheme.default_port());
     host.strip_suffix(&default).unwrap_or(&host) == t.authority()
@@ -146,14 +146,9 @@ pub(crate) async fn send<S: AsyncWrite + Unpin>(client: &mut S, bytes: &[u8], de
             .await;
 }
 
-/// Send the block page for a decision (SPEC 4.7).
-pub(crate) async fn send_block<S: AsyncWrite + Unpin>(
-    client: &mut S,
-    ev: &mut RequestEvent,
-    d: &Decision,
-    deps: &ProxyDeps,
-) {
-    let info = BlockInfo {
+/// The rendered block page for a decision (SPEC 4.7).
+pub(crate) fn block_html(ev: &RequestEvent, d: &Decision, deps: &ProxyDeps) -> String {
+    deps.block_page.render(&BlockInfo {
         url: &ev.url,
         host: &ev.dest_host,
         reason: d.reason,
@@ -161,26 +156,33 @@ pub(crate) async fn send_block<S: AsyncWrite + Unpin>(
         category: d.category.as_deref(),
         event_id: &ev.event_id,
         timestamp: &ev.timestamp,
-    };
-    let html = deps.block_page.render(&info);
+    })
+}
+
+/// Send the block page for a decision (SPEC 4.7).
+pub(crate) async fn send_block<S: AsyncWrite + Unpin>(
+    client: &mut S,
+    ev: &mut RequestEvent,
+    d: &Decision,
+    deps: &ProxyDeps,
+) {
+    let html = block_html(ev, d, deps);
     send(client, &page(403, d.reason, &ev.event_id, &html, &[]), deps).await;
     ev.status = 403;
 }
 
-/// Answer a failure with an error page (unless a response was already started) and log it.
-pub(crate) async fn send_fail<S: AsyncWrite + Unpin>(
-    client: &mut S,
-    ev: &mut RequestEvent,
-    f: &Fail,
-    deps: &ProxyDeps,
-) {
+/// Extra headers of an error status.
+pub(crate) fn error_headers(status: u16) -> Vec<(&'static str, String)> {
+    match status {
+        503 => vec![("retry-after", "5".into())],
+        407 => vec![("proxy-authenticate", "Basic realm=\"webfilter\"".into())],
+        _ => vec![],
+    }
+}
+
+/// Record a failure in the log event (status, reason, error, block action).
+pub(crate) fn note_fail(ev: &mut RequestEvent, f: &Fail) {
     if let Some(status) = f.status {
-        let extra: Vec<(&str, String)> = match status {
-            503 => vec![("retry-after", "5".into())],
-            407 => vec![("proxy-authenticate", "Basic realm=\"webfilter\"".into())],
-            _ => vec![],
-        };
-        send(client, &error_page(status, f.reason, &ev.event_id, &extra), deps).await;
         ev.status = status;
     }
     ev.reason = f.reason.as_str();
@@ -195,6 +197,20 @@ pub(crate) async fn send_fail<S: AsyncWrite + Unpin>(
     ) {
         ev.action = Action::Block.as_str();
     }
+}
+
+/// Answer a failure with an error page (unless a response was already started) and log it.
+pub(crate) async fn send_fail<S: AsyncWrite + Unpin>(
+    client: &mut S,
+    ev: &mut RequestEvent,
+    f: &Fail,
+    deps: &ProxyDeps,
+) {
+    if let Some(status) = f.status {
+        send(client, &error_page(status, f.reason, &ev.event_id, &error_headers(status)), deps)
+            .await;
+    }
+    note_fail(ev, f);
 }
 
 /// Serve one client connection (or one intercepted tunnel) until it closes or must be closed.
@@ -384,7 +400,7 @@ where
     let (tcp, ip) = connect_upstream(&ips, t.port, deps).await?;
     ev.dest_ip = Some(ip.to_string());
     let upstream: UpstreamBox = match tunnel {
-        Some(tn) => Box::new(upstream_tls(tcp, &tn.host, deps).await?),
+        Some(tn) => Box::new(upstream_tls(tcp, &tn.host, deps, None).await?),
         None => Box::new(tcp),
     };
     forward(client, buf, head, ev, deps, &t, framing, websocket, upstream).await
@@ -401,11 +417,13 @@ pub(crate) fn resolved_rule(
         .find(|d| d.reason != Reason::None)
 }
 
-/// TLS to the origin, SNI = CONNECT host, certificate always verified (D-20).
-async fn upstream_tls(
+/// TLS to the origin, SNI = CONNECT host, certificate always verified (D-20). `alpn` replaces
+/// the default `http/1.1` offer (ALPN mirroring, D-40).
+pub(crate) async fn upstream_tls(
     tcp: TcpStream,
     host: &Host,
     deps: &ProxyDeps,
+    alpn: Option<Vec<Vec<u8>>>,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Fail> {
     let name = match host {
         Host::Domain(d) => ServerName::try_from(d.clone()),
@@ -413,7 +431,15 @@ async fn upstream_tls(
         Host::Ipv6(v6) => Ok(ServerName::from(IpAddr::V6(*v6))),
     }
     .map_err(|_| fail(502, Reason::UpstreamError, "invalid server name"))?;
-    let connector = tokio_rustls::TlsConnector::from(Arc::clone(&deps.upstream_tls));
+    let config = match alpn {
+        Some(alpn) => {
+            let mut c = (*deps.upstream_tls).clone();
+            c.alpn_protocols = alpn;
+            Arc::new(c)
+        }
+        None => Arc::clone(&deps.upstream_tls),
+    };
+    let connector = tokio_rustls::TlsConnector::from(config);
     let handshake =
         timeout(Duration::from_secs(deps.cfg.timeouts.tls_handshake), connector.connect(name, tcp));
     match handshake.await {
