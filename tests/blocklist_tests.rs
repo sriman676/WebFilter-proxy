@@ -158,6 +158,7 @@ fn write_lists(dir: &std::path::Path, domains: &str) -> BlocklistConfig {
         url_patterns: dir.join("url_patterns.txt"),
         ip_blocklist: dir.join("ip_blocklist.txt"),
         reload_interval_secs: 1,
+        ..BlocklistConfig::default()
     }
 }
 

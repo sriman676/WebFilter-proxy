@@ -495,7 +495,7 @@ async fn i20_i28_smuggling_corpus_never_reaches_origin() {
             ),
             431,
         ),
-        ("SM-25a", format!("CONNECT good.test HTTP/1.1\r\nHost: good.test\r\n\r\n"), 400),
+        ("SM-25a", "CONNECT good.test HTTP/1.1\r\nHost: good.test\r\n\r\n".to_owned(), 400),
         ("SM-25b", format!("CONNECT user@{h} HTTP/1.1\r\nHost: {h}\r\n\r\n"), 403),
         (
             "SM-25c",

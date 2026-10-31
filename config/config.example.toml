@@ -42,6 +42,14 @@ domains = "blocklists/domains.txt"
 url_patterns = "blocklists/url_patterns.txt"
 ip_blocklist = "blocklists/ip_blocklist.txt"
 reload_interval_secs = 5
+utc_offset = "+00:00"             # A-27: local time zone for category schedules (fixed offset, e.g. "+05:30")
+
+# A-27: optional named categories, each switchable and optionally limited to time windows.
+# [[blocklists.categories]]
+# name = "social"                   # shown on the block page and in logs
+# enabled = true
+# domains = "blocklists/social_domains.txt"   # any of domains / url_patterns / ip_blocklist
+# active = ["Mon-Fri 09:00-17:00"]  # empty or omitted = always; "Fri 22:00-02:00" spans midnight
 
 [rules]
 allow_domains = []

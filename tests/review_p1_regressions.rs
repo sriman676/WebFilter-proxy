@@ -28,6 +28,7 @@ fn lists(patterns: &str) -> Blocklists {
         domains: parse_domains("evil.com\n").unwrap().list,
         patterns: parse_patterns(patterns).unwrap().list,
         ips: parse_ips("10.0.0.0/8\n").unwrap().list,
+        categories: vec![],
     }
 }
 
