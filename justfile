@@ -77,7 +77,7 @@ pentest-p0:
 pentest-p1:
     scripts/pentest_p1.sh
 pentest-p2:
-    @echo "TODO: pentest-p2 lands in Phase 2 (PENTEST_PLAN PT-2.x)" >&2; exit 1
+    scripts/pentest_p2.sh
 pentest-p3:
     @echo "TODO: pentest-p3 lands in Phase 3 (PENTEST_PLAN PT-3.x)" >&2; exit 1
 pentest-p4:

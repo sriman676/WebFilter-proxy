@@ -41,6 +41,27 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "request_head"
+path = "fuzz_targets/request_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_head"
+path = "fuzz_targets/response_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunked_codec"
+path = "fuzz_targets/chunked_codec.rs"
+test = false
+doc = false
+bench = false
+
 # Separate workspace so the main package never builds fuzz code.
 [workspace]
 members = ["."]
