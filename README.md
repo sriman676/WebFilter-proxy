@@ -13,6 +13,26 @@ cargo run --bin webfilter-proxy -- --config config/config.toml run
 cargo run --bin webfilter-client -- https://example.com https://rust-lang.org
 # -> output/example.com.html, output/rust-lang.org.html
 ```
+## HTTPS interception (optional, lab only)
+> **Ethics and scope (D-30, D-68):** interception decrypts other people's traffic. Only intercept your own
+> devices or users who were told, on your own machine or lab. Never install the CA on machines you do not own.
+> Banking/health/government sites should stay in `tls.passthrough_domains`.
+
+1. In `config/config.toml` set `[tls] intercept = true` (default `ca_dir = "~/.webfilter"`).
+2. `webfilter-proxy --config config/config.toml ca generate` creates `ca.pem` (public) and `ca.key` (0600,
+   never share or commit it). The proxy refuses to start if the key is group/world-readable, a symlink,
+   or owned by another user.
+3. `webfilter-proxy --config config/config.toml ca export > webfilter-ca.pem`
+4. **Firefox only (recommended, A-28):** Settings -> Privacy & Security -> Certificates -> View Certificates ->
+   Authorities -> Import -> `webfilter-ca.pem` -> tick "Trust this CA to identify websites". Firefox keeps
+   its own store, so no other application trusts the CA. Set Firefox's manual proxy to `127.0.0.1:8080`
+   for HTTP and HTTPS, and disable HTTP/3 (`network.http.http3.enable = false`): QUIC/UDP bypasses a TCP proxy (D-21).
+5. To undo: delete the CA in the same Firefox dialog, then delete `~/.webfilter/`.
+6. Command-line check: `webfilter-client --ca-cert webfilter-ca.pem https://example.com`.
+
+Upstream certificates are always verified (D-20); an invalid origin certificate gives `502 upstream_cert_invalid`.
+For manual experiments, `scripts/gen_test_pki.sh <dir> <host...>` creates a throwaway test PKI.
+
 ## Documentation map
 Start at `docs/INDEX.md` (it lists every document, its purpose and the reading order; docs load progressively, D-47). Gap history: `archive/GAPS_ANALYSIS.md`.
 

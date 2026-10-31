@@ -84,7 +84,7 @@ pentest-p2:
 pentest-p3:
     scripts/pentest_p3.sh
 pentest-p4:
-    @echo "TODO: pentest-p4 lands in Phase 4 (PENTEST_PLAN PT-4.x)" >&2; exit 1
+    scripts/pentest_p4.sh
 pentest-p5:
     @echo "TODO: pentest-p5 lands in Phase 5 (PENTEST_PLAN PT-5.x)" >&2; exit 1
 pentest-p6:

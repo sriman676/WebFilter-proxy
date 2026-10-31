@@ -1,12 +1,14 @@
 //! The per-request pipeline (SPEC 4.2): every request on a connection is validated, canonicalized,
 //! policy-checked and filtered (D-10), then forwarded on a fresh upstream connection (D-07)
-//! rebuilt only from normalized fields (D-09). Exactly one log event per request.
+//! rebuilt only from normalized fields (D-09). Exactly one log event per request. The same
+//! pipeline serves requests inside intercepted TLS tunnels (SPEC 4.9).
 #![forbid(unsafe_code)]
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, timeout};
@@ -22,7 +24,7 @@ use super::io::{IoError, copy_body, read_head};
 use super::response::{BlockInfo, error_page, page};
 use crate::filter::{Action, Decision, Phase};
 use crate::logger::RequestEvent;
-use crate::normalize::{NormalizedTarget, Scheme, TargetContext, canonicalize};
+use crate::normalize::{Host, NormalizedTarget, Scheme, TargetContext, TargetError, canonicalize};
 use crate::policy::{PolicyVerdict, PortKind, check_destination, check_port};
 use crate::reason::Reason;
 
@@ -63,6 +65,33 @@ pub(crate) fn upstream_fail(e: &IoError) -> Fail {
     }
 }
 
+pub(crate) fn client_gone() -> Fail {
+    Fail { status: None, reason: Reason::None, error: "client connection closed" }
+}
+
+/// Any upstream byte stream (plain TCP or verified TLS).
+pub(crate) trait Upstream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Upstream for T {}
+pub(crate) type UpstreamBox = Box<dyn Upstream>;
+
+/// An intercepted tunnel: inner requests are origin-form for this CONNECT authority, go only to
+/// the addresses validated at CONNECT time, and over verified TLS (D-20, D-22).
+#[derive(Debug, Clone)]
+pub struct Tunnel {
+    /// CONNECT host.
+    pub host: Host,
+    /// CONNECT port.
+    pub port: u16,
+    /// Addresses validated at CONNECT (never re-resolved, D-11).
+    pub ips: Vec<IpAddr>,
+    /// ClientHello SNI.
+    pub sni: Option<String>,
+    /// ClientHello carried ECH (D-21).
+    pub ech: bool,
+    /// Authenticated CONNECT user.
+    pub user: Option<String>,
+}
+
 /// Query parameter names only (D-18).
 fn query_keys(t: &NormalizedTarget) -> Vec<String> {
     let query = t.query.as_deref().unwrap_or("");
@@ -81,9 +110,8 @@ fn client_wants_keep_alive(h: &RequestHead) -> bool {
     }
 }
 
-/// R7: a `Host` header, if present, must equal the target authority (default port normalized).
-fn host_matches(h: &RequestHead, t: &NormalizedTarget) -> bool {
-    let Some(host) = single(&h.headers, "host") else { return true };
+/// The `Host` value equals the target authority (case-insensitive, default port normalized).
+fn host_equals(host: &[u8], t: &NormalizedTarget) -> bool {
     let host = String::from_utf8_lossy(host).to_ascii_lowercase();
     let default = format!(":{}", t.scheme.default_port());
     host.strip_suffix(&default).unwrap_or(&host) == t.authority()
@@ -161,6 +189,7 @@ pub(crate) async fn send_fail<S: AsyncWrite + Unpin>(
         f.reason,
         Reason::UserinfoInUrl
             | Reason::HostMismatch
+            | Reason::SniMismatch
             | Reason::PortNotAllowed
             | Reason::PrivateRange
     ) {
@@ -168,9 +197,13 @@ pub(crate) async fn send_fail<S: AsyncWrite + Unpin>(
     }
 }
 
-/// Serve one client connection until it closes, fails or must be closed.
-pub async fn serve_connection<S>(mut client: S, peer: SocketAddr, deps: Arc<ProxyDeps>)
-where
+/// Serve one client connection (or one intercepted tunnel) until it closes or must be closed.
+pub async fn serve_connection<S>(
+    mut client: S,
+    peer: SocketAddr,
+    deps: Arc<ProxyDeps>,
+    tunnel: Option<Arc<Tunnel>>,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let mut buf = Vec::new();
@@ -180,6 +213,13 @@ where
         idle_secs = deps.cfg.timeouts.client_keepalive_idle;
         let limits = deps.limits;
         let mut ev = deps.new_event(peer);
+        if let Some(tn) = &tunnel {
+            ev.tls_intercepted = true;
+            ev.tls_sni.clone_from(&tn.sni);
+            ev.ech_present = tn.ech;
+            ev.proxy_user.clone_from(&tn.user);
+            ev.alpn = Some("http/1.1".into());
+        }
         let started = Instant::now();
         let head =
             match read_head(&mut client, &mut buf, deadline, |b| parse_request_head(b, &limits))
@@ -200,7 +240,16 @@ where
         ev.user_agent =
             single(&head.headers, "user-agent").map(|v| String::from_utf8_lossy(v).into_owned());
 
-        let outcome = handle_request(&mut client, &mut buf, &head, &mut ev, &deps, peer.ip()).await;
+        let outcome = handle_request(
+            &mut client,
+            &mut buf,
+            &head,
+            &mut ev,
+            &deps,
+            peer.ip(),
+            tunnel.as_deref(),
+        )
+        .await;
         ev.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let keep_alive = match outcome {
             Ok(Outcome::Forwarded { keep_alive }) => keep_alive,
@@ -218,24 +267,8 @@ where
     }
 }
 
-async fn handle_request<S>(
-    client: &mut S,
-    buf: &mut Vec<u8>,
-    head: &RequestHead,
-    ev: &mut RequestEvent,
-    deps: &Arc<ProxyDeps>,
-    peer: IpAddr,
-) -> Result<Outcome, Fail>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    // 2. Validate. 3. Auth. 4. TRACE (in validate) and target forms.
-    let framing = validate_request(head).map_err(head_fail)?;
-    deps.authorize(head, ev, peer).await?;
-    if head.method == "CONNECT" {
-        return super::connect::handle_connect(client, buf, head, ev, deps).await;
-    }
-    // 5. Canonicalize (4.5); plain listener accepts only http absolute-form (R9).
+/// Target form, canonicalization and Host rules for a plain-listener request (R7, R9).
+fn plain_target(head: &RequestHead) -> Result<NormalizedTarget, Fail> {
     let t = canonicalize(&head.target, TargetContext::PlainAbsolute).map_err(|e| {
         fail(
             if e.reason() == Reason::UserinfoInUrl { 403 } else { 400 },
@@ -243,7 +276,6 @@ where
             "invalid request target",
         )
     })?;
-    note_target(ev, &t);
     if t.scheme != Scheme::Http {
         return Err(fail(
             400,
@@ -251,41 +283,177 @@ where
             "https absolute-form on the plain listener (R9)",
         ));
     }
-    if !host_matches(head, &t) {
+    if single(&head.headers, "host").is_some_and(|h| !host_equals(h, &t)) {
         return Err(fail(400, Reason::InvalidRequest, "Host does not match the target (R7)"));
     }
+    Ok(t)
+}
+
+/// Inside a tunnel: origin-form (or matching absolute-form) for the CONNECT authority, and an
+/// HTTP/1.1 `Host` equal to it (R7, D-22).
+fn tunnel_target(head: &RequestHead, tn: &Tunnel) -> Result<NormalizedTarget, Fail> {
+    let host = tn.host.to_string();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let ctx = TargetContext::InterceptedOrigin { connect_host: host, port: tn.port };
+    let t = canonicalize(&head.target, ctx).map_err(|e| match e {
+        TargetError::HostMismatch => {
+            fail(403, Reason::HostMismatch, "target does not match the CONNECT authority")
+        }
+        e => fail(
+            if e.reason() == Reason::UserinfoInUrl { 403 } else { 400 },
+            e.reason(),
+            "invalid request target",
+        ),
+    })?;
+    let host_ok = match single(&head.headers, "host") {
+        Some(h) => host_equals(h, &t),
+        None => head.version == HttpVersion::Http10,
+    };
+    if !host_ok {
+        return Err(fail(
+            403,
+            Reason::HostMismatch,
+            "Host does not match the CONNECT authority (D-22)",
+        ));
+    }
+    Ok(t)
+}
+
+async fn handle_request<S>(
+    client: &mut S,
+    buf: &mut Vec<u8>,
+    head: &RequestHead,
+    ev: &mut RequestEvent,
+    deps: &Arc<ProxyDeps>,
+    peer: IpAddr,
+    tunnel: Option<&Tunnel>,
+) -> Result<Outcome, Fail>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    // 2. Validate. 3. Auth (on the plain listener; tunnels inherit the CONNECT identity).
+    let framing = validate_request(head).map_err(head_fail)?;
+    let t = match tunnel {
+        Some(tn) => {
+            if head.method == "CONNECT" {
+                return Err(fail(400, Reason::InvalidRequest, "CONNECT inside a tunnel"));
+            }
+            tunnel_target(head, tn)?
+        }
+        None => {
+            deps.authorize(head, ev, peer).await?;
+            if head.method == "CONNECT" {
+                return super::connect::handle_connect(client, buf, head, ev, deps, peer).await;
+            }
+            let t = plain_target(head);
+            if let Ok(t) = &t {
+                note_target(ev, t);
+            }
+            let t = t?;
+            check_port(PortKind::Http, t.port, &deps.cfg.ports)
+                .map_err(|r| fail(403, r, "port not allowed"))?;
+            t
+        }
+    };
+    note_target(ev, &t);
     let websocket = is_websocket_upgrade(head);
     if websocket {
         ev.upgrade = Some("websocket".into());
     }
 
-    // 7. Port policy. 8. Pre-DNS rules: a blocked name is never resolved.
-    check_port(PortKind::Http, t.port, &deps.cfg.ports)
-        .map_err(|r| fail(403, r, "port not allowed"))?;
+    // 8. Pre-DNS rules: a blocked name is never resolved.
     let d = deps.evaluate(&t, Phase::PreDns);
     note_decision(ev, &d);
     if d.is_block() {
         send_block(client, ev, &d, deps).await;
         return Ok(Outcome::Done);
     }
-
-    // 6/9. Resolve once; validate every address; rule 3 per address.
-    let ips = resolve(&t, ev, deps).await?;
-    if let Some(d) = ips
-        .iter()
-        .map(|ip| deps.evaluate(&t, Phase::Resolved { ip: *ip }))
-        .find(|d| d.reason != Reason::None)
-    {
+    // 6/9. Resolve once (tunnels reuse the CONNECT-time addresses); rule 3 per address.
+    let ips = match tunnel {
+        Some(tn) => tn.ips.clone(),
+        None => resolve(&t, ev, deps).await?,
+    };
+    if let Some(d) = resolved_rule(deps, &t, &ips) {
         note_decision(ev, &d);
         if d.is_block() {
             send_block(client, ev, &d, deps).await;
             return Ok(Outcome::Done);
         }
     }
-
-    // 10. Fresh upstream connection, request rebuilt from normalized fields (D-07, D-09).
-    let (mut upstream, ip) = connect_upstream(&ips, t.port, deps).await?;
+    // 10. Fresh upstream connection (D-07), verified TLS inside tunnels (D-20).
+    let (tcp, ip) = connect_upstream(&ips, t.port, deps).await?;
     ev.dest_ip = Some(ip.to_string());
+    let upstream: UpstreamBox = match tunnel {
+        Some(tn) => Box::new(upstream_tls(tcp, &tn.host, deps).await?),
+        None => Box::new(tcp),
+    };
+    forward(client, buf, head, ev, deps, &t, framing, websocket, upstream).await
+}
+
+/// The first non-allow decision of rule 3 over the validated addresses.
+pub(crate) fn resolved_rule(
+    deps: &ProxyDeps,
+    t: &NormalizedTarget,
+    ips: &[IpAddr],
+) -> Option<Decision> {
+    ips.iter()
+        .map(|ip| deps.evaluate(t, Phase::Resolved { ip: *ip }))
+        .find(|d| d.reason != Reason::None)
+}
+
+/// TLS to the origin, SNI = CONNECT host, certificate always verified (D-20).
+async fn upstream_tls(
+    tcp: TcpStream,
+    host: &Host,
+    deps: &ProxyDeps,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Fail> {
+    let name = match host {
+        Host::Domain(d) => ServerName::try_from(d.clone()),
+        Host::Ipv4(v4) => Ok(ServerName::from(IpAddr::V4(*v4))),
+        Host::Ipv6(v6) => Ok(ServerName::from(IpAddr::V6(*v6))),
+    }
+    .map_err(|_| fail(502, Reason::UpstreamError, "invalid server name"))?;
+    let connector = tokio_rustls::TlsConnector::from(Arc::clone(&deps.upstream_tls));
+    let handshake =
+        timeout(Duration::from_secs(deps.cfg.timeouts.tls_handshake), connector.connect(name, tcp));
+    match handshake.await {
+        Err(_) => Err(fail(504, Reason::Timeout, "upstream TLS handshake timeout")),
+        Ok(Ok(s)) => Ok(s),
+        Ok(Err(e)) => {
+            let cert_problem =
+                e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()).is_some_and(|r| {
+                    matches!(
+                        r,
+                        rustls::Error::InvalidCertificate(_)
+                            | rustls::Error::NoCertificatesPresented
+                    )
+                });
+            Err(if cert_problem {
+                fail(502, Reason::UpstreamCertInvalid, "upstream certificate invalid")
+            } else {
+                fail(502, Reason::UpstreamError, "upstream TLS failed")
+            })
+        }
+    }
+}
+
+/// Steps 10-11: send the rebuilt request, relay `100 Continue`, stream the body, validate the
+/// response, apply rule 6 and stream it back.
+#[allow(clippy::too_many_arguments)]
+async fn forward<S>(
+    client: &mut S,
+    buf: &mut Vec<u8>,
+    head: &RequestHead,
+    ev: &mut RequestEvent,
+    deps: &Arc<ProxyDeps>,
+    t: &NormalizedTarget,
+    framing: BodyFraming,
+    websocket: bool,
+    mut upstream: UpstreamBox,
+) -> Result<Outcome, Fail>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let mut headers = forward_headers(&head.headers, websocket);
     headers.insert(0, ("host".into(), t.authority().into_bytes()));
     headers.push((
@@ -329,7 +497,6 @@ where
             })?;
     }
 
-    // 11. Response: skip interim 1xx, validate framing, rule 6, stream.
     let resp = match final_resp {
         Some(r) => r,
         None => loop {
@@ -349,7 +516,7 @@ where
         single(&resp.headers, "content-type").map(|v| String::from_utf8_lossy(v).into_owned());
     ev.http_content_type =
         content_type.as_deref().map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
-    let d = deps.evaluate(&t, Phase::ResponseHeaders { content_type: content_type.as_deref() });
+    let d = deps.evaluate(t, Phase::ResponseHeaders { content_type: content_type.as_deref() });
     if d.reason != Reason::None {
         note_decision(ev, &d);
     }
@@ -383,10 +550,6 @@ where
     Ok(Outcome::Forwarded { keep_alive })
 }
 
-pub(crate) fn client_gone() -> Fail {
-    Fail { status: None, reason: Reason::None, error: "client connection closed" }
-}
-
 /// Resolve once and validate every address (D-11).
 pub(crate) async fn resolve(
     t: &NormalizedTarget,
@@ -407,7 +570,7 @@ pub(crate) async fn resolve(
 }
 
 async fn read_response(
-    upstream: &mut TcpStream,
+    upstream: &mut UpstreamBox,
     buf: &mut Vec<u8>,
     deadline: Instant,
     deps: &ProxyDeps,
