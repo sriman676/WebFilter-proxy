@@ -6,7 +6,7 @@ Files (JSON Lines, UTF-8, one object per line, `\n` terminated, mode 0640):
 - `webfilter_stats.jsonl`  60 s summaries
 Rotation (applies to ALL log files; SIGUSR1 reopens files): when `max_bytes` is reached rename `X` -> `X.1`, shifting `.1`->`.2` ... keep `backup_count`;
 a line is never split across files. Writes are single `write_all` of a complete line.
-Field names align with Splunk CIM **Web**. All keys are ALWAYS present (null when unknown).
+Field names align with the CIM **Web** model (ECS-like names in OpenSearch). All keys are ALWAYS present (null when unknown).
 
 ## Request event
 | Field | Type | Notes |
@@ -59,7 +59,7 @@ Field names align with Splunk CIM **Web**. All keys are ALWAYS present (null whe
 `{"timestamp","event_type":"system","kind":<enum>,"detail":{...}}` with `kind` in:
 `proxy_start`, `proxy_stop`, `config_loaded`, `blocklist_loaded`, `blocklist_reload_failed`,
 `ca_generated`, `ca_loaded`, `ca_permission_error`, `log_dropped` (with count), `log_rotated`, `panic_isolated`,
-`auth_lockout`, `listener_error`, `feed_updated`, `feed_failed`, `feed_rejected`, `feed_stale`, `malware_detected`, `scanner_down`, `access_request_created`, `access_request_decided`, `temp_allow_added`, `temp_allow_expired`, `policy_reloaded`, `h2_flood` (detail: violation type, counters), `orig_dst_failed`. Never contains secrets.
+`auth_lockout`, `listener_error`, `feed_updated`, `feed_failed`, `feed_rejected`, `feed_stale`, `malware_detected`, `scanner_down`, `access_request_created`, `access_request_decided`, `temp_allow_added`, `temp_allow_expired`, `policy_reloaded`, `h2_flood` (detail: violation type, counters), `orig_dst_failed`, `insecure_permissions` (detail: `files`, world-writable config/list/template paths). Never contains secrets.
 
 ## Stats event
 `{"timestamp","event_type":"stats","window_secs":60,"requests","allowed","blocked","errors","bytes_in","bytes_out","active_connections","dropped_log_events","top_blocked":[{"host","count"}],"lists":{"domains","regexes","ips"}}`
@@ -74,5 +74,5 @@ Field names align with Splunk CIM **Web**. All keys are ALWAYS present (null whe
 ## Extra files (v1.1)
 - `webfilter_admin.jsonl`: `{"timestamp","event_type":"admin","actor","remote_addr","action","target","result"}`.
 - `webfilter_access.jsonl`: `{"timestamp","event_type":"access_request","request_id","event_id","client_id","host","reason","status","decided_by","ttl_secs","justification_len"}` (justification text lives only in `state/access_requests.jsonl`).
-Splunk input whitelist: `webfilter(_system|_stats|_admin|_access)?\.jsonl$`.
+Shipper inputs (Fluent Bit, `siem/opensearch/fluent-bit.conf`): `webfilter.jsonl`, `webfilter_system/_stats/_admin/_access.jsonl`, one index each (`webfilter-requests`, `-system`, `-stats`, `-admin`, `-access`).
 

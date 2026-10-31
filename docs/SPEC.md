@@ -6,7 +6,7 @@ Normative words: MUST / MUST NOT / SHOULD. Decisions in DECISIONS.md are final.
 One Rust package, two programs sharing a library:
 - **`webfilter-proxy`** - multi-threaded forward proxy (standard HTTP proxy protocol:
   absolute-form requests + `CONNECT`), blocklist filtering, optional full TLS interception,
-  JSON logs for Splunk.
+  JSON logs for a SIEM (OpenSearch, A-14).
 - **`webfilter-client`** - fetches URLs *through the proxy* and saves each response as an HTML
   file with a deterministic, safe name.
 
@@ -26,7 +26,7 @@ Passthrough = CONNECT tunnel relayed without decryption.
  [accept + limits] -> [HTTP parse/validate] -> [auth] -> [target canonicalize] -> [dest policy]
     -> [filter: allow/block rules] -> [forward upstream]  ---- TCP/TLS ----> origin
                                          |                (boundary B2: untrusted origins)
-                                         +-> [EventLogger] -> logs/*.jsonl -> Splunk UF
+                                         +-> [EventLogger] -> logs/*.jsonl -> Fluent Bit
  [CA store ~/.webfilter]  (boundary B3: secrets)      [config + blocklists] (boundary B4: operator files)
 ```
 Modules: `config`, `blocklist`, `normalize`, `policy` (dest/port rules), `filter`, `logger`,
@@ -355,9 +355,10 @@ non-loopback listen requires `proxy_auth`; CA dir perms; regex/blocklist paths r
 ## 7. Logging
 See LOG_SCHEMA.md (authoritative).
 
-## 8. Splunk
-Files in `splunk/`: `indexes.conf`, `inputs.conf`, `props.conf`, `savedsearches.conf` (detections incl.
-attack-attempt searches that Phase 5 pentest replays). Sourcetype `webfilter:json`, index `webfilter`.
+## 8. SIEM (OpenSearch, A-14)
+Files in `siem/opensearch/`: `docker-compose.yml`, `fluent-bit.conf`, `parsers.conf`, index templates and
+`detections.json` (detections incl. attack-attempt rules that the Phase 5 pentest replays, A-35). Indices `webfilter-*`.
+Scripts: `scripts/siem/` (`detect.py`, `gen_test_traffic.py`, `siem_test.py`, `siem_e2e.sh`); logic in siem/opensearch/DETECTIONS.md.
 
 ## 9. Non-functional
 Performance targets D-34. `cargo fmt`/`clippy -D warnings` clean. Coverage >= 85% lines on `blocklist`,
@@ -367,7 +368,7 @@ Documented public items. `just test`/`just e2e` build with `--features insecure-
 
 ## 10. Repository conventions
 `justfile` targets (create in Phase 0): `release` (builds WITHOUT `insecure-test` and fails if the binaries contain the strings `WEBFILTER_TEST_HOSTS`/`WEBFILTER_TEST_ORIG_DST`), `check-env`, `fmt`, `lint`, `test`, `e2e`, `cov`, `fuzz-smoke`,
-`audit` (deny+audit+geiger), `sbom`, `load`, `pentest-p<N>` (N=1..13), `ui-lint`, `ui-e2e` (headless browser: E-72, E-80), `feeds-test`, `scan-e2e` (Docker clamd: E-63..E-67), `promtool`; plain `just e2e` runs only tests with no external services, `splunk-e2e`, `e2e-netns` (Linux, sudo), `h2spec`, `docs-check`, `acceptance`
+`audit` (deny+audit+geiger), `sbom`, `load`, `pentest-p<N>` (N=1..13), `ui-lint`, `ui-e2e` (headless browser: E-72, E-80), `feeds-test`, `siem-test`, `siem-e2e`, `scan-e2e` (Docker clamd: E-63..E-67), `promtool`; plain `just e2e` runs only tests with no external services, `e2e-netns` (Linux, sudo), `h2spec`, `docs-check`, `acceptance`
 (runs everything). CI (GitHub Actions; includes an Ubuntu job with sudo for `e2e-netns` once Phase 7 lands): fmt, clippy, test+nextest, e2e, coverage gate, deny, audit,
 fuzz-smoke (60 s/target), build release with `insecure-test` OFF assertion. CI actions are pinned by commit SHA, builds use `--locked`, the toolchain comes from `rust-toolchain.toml` (D-46). Pre-commit hook: fmt +
 clippy + gitleaks. Branching/tagging per D-28. `CHANGELOG.md` kept per phase.

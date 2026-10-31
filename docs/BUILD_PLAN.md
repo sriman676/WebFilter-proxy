@@ -17,7 +17,7 @@ Never ask questions: use the documented defaults; log new choices in `docs/DECIS
 
 ## Milestones (D-35)
 - **M1 = Phases 0-3**: the assignment (multi-threaded proxy + client saving named HTML) with filtering and logs. Demoable alone; trace in `docs/ACCEPTANCE.md (Part B)`. Tag `m1-complete`.
-- **M2 = Phases 4-5**: TLS interception, Splunk and detections. Tag `m2-complete`.
+- **M2 = Phases 4-5**: TLS interception, SIEM (OpenSearch, A-14) and detections. Tag `m2-complete`.
 - **M3 = Phases 6-7**: HTTP/2 inside intercepted TLS, transparent mode (Linux lab). Tag `m3-complete`.
 - **M4 = Phase 8**: hardening, compatibility, final regression, acceptance. Tag `m4-complete` (= v1.0 complete).
 - **M5 = Phases 9-13 (v1.1)**: policies and limits, feeds and scanning, operations/admin, client enhancements, final regression. Tag `m5-complete`. Features default OFF.
@@ -31,7 +31,7 @@ Do not start a milestone before the previous one is tagged. Run `just docs-check
 | 2 | Proxy server (HTTP + CONNECT tunnel, no interception) - split into 3 sub-phases | M1 | [phases/PHASE-2.md](phases/PHASE-2.md) |
 | 3 | Client | M1 | [phases/PHASE-3.md](phases/PHASE-3.md) |
 | 4 | TLS interception | M2 | [phases/PHASE-4.md](phases/PHASE-4.md) |
-| 5 | Observability, Splunk, detections | M2 | [phases/PHASE-5.md](phases/PHASE-5.md) |
+| 5 | Observability, OpenSearch, detections | M2 | [phases/PHASE-5.md](phases/PHASE-5.md) |
 | 6 | HTTP/2 inside intercepted TLS | M3 | [phases/PHASE-6.md](phases/PHASE-6.md) |
 | 7 | Transparent mode (Linux lab) | M3 | [phases/PHASE-7.md](phases/PHASE-7.md) |
 | 8 | Hardening, performance, full regression, docs | M4 | [phases/PHASE-8.md](phases/PHASE-8.md) |
@@ -48,7 +48,7 @@ phase brief. Operator prompts: `README.md (Prompts section)`.
 - `just acceptance` (see `docs/ACCEPTANCE.md`) passes on a clean Linux checkout, CI green (Linux+macOS; netns job on Linux with sudo).
 - All SPEC requirements implemented; every E-xx, I-xx, SM-xx, U-xx, PT-xx recorded as passing.
 - Zero open Critical/High findings; Medium accepted or fixed; FINAL_REPORT written.
-- 1k-line sample log ingested in Splunk (or documented fallback) with correct fields; detections validated.
+- Sample logs ingested in OpenSearch (or the `siem-test` fallback) with correct fields; detections validated.
 - README steps verified on a clean machine. All decisions/addenda documented. SBOM generated.
 
 ## Definition of Done (v1.1, after Phase 13)

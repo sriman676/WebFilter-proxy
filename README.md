@@ -1,6 +1,6 @@
 # WebFilter Proxy (Rust)
 
-Multi-threaded HTTP/HTTPS forward proxy with blocklists, optional TLS interception and Splunk-ready JSON
+Multi-threaded HTTP/HTTPS forward proxy with blocklists, optional TLS interception and SIEM-ready JSON
 logs, plus a client that fetches URLs through the proxy and saves them as named HTML files.
 
 > Status: instruction scaffold. Build it with Claude Code: open this folder with `claude`, paste the

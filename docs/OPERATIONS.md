@@ -36,7 +36,7 @@ Memory scales with list entries (about 100 bytes/domain entry; feed URL digests 
 
 ## Privacy and legal (D-68)
 Interception reads personal data. Use it only on devices you own or whose users were informed and authorized it; show a notice; keep
-banking, health and government names in `tls.passthrough_domains`; keep retention bounded (Splunk `frozenTimePeriodInSecs`, default 90
+banking, health and government names in `tls.passthrough_domains`; keep retention bounded (an OpenSearch ISM delete policy, default 90
 days); restrict access to logs, `state/` and the admin token to the operator; query values, bodies and cookies are never logged;
 access-request justifications live only in `state/access_requests.jsonl`. Check local law and your organization's policy before enabling.
 

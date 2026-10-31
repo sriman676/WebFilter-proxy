@@ -33,6 +33,7 @@ Inventory is capped: 19 files in `docs/` (+14 phase briefs, 2 pentest templates,
 | - | docs/DECISIONS_ADDENDUM.md | decisions made during the build (append-only) | grows |
 | - | docs/BUILD_PLAN.md | loop, milestones, phase table | 600 |
 | - | README.md | human entry point: quick start, doc map, operator prompts (not an agent doc) | 650 |
+| - | siem/opensearch/DETECTIONS.md | detection logic, thresholds, tuning, false positives (A-35; lives beside the rules, outside the docs cap) | 700 |
 | - | docs/pentest/** | per-phase reports and findings (written during the build) | grows |
 | - | tests/corpus/* | test data: url bypass, smuggling, filename oracle, feed, snapshot HTML, robots, admin Host, access requests | data |
 
@@ -53,9 +54,9 @@ Inventory is capped: 19 files in `docs/` (+14 phase briefs, 2 pentest templates,
 1 overview - 2 glossary - 3 architecture - 4.1 listener - 4.2 pipeline - 4.3 validation R1-R15 - 4.4 headers -
 4.5 canonicalization - 4.6 filtering + blocklist grammar - 4.7 block page - 4.8 upstream - 4.9 TLS interception -
 4.10 auth - 4.11 limits/timeouts - 4.12 error matrix - 4.13 CLI/signals - 4.14 stats - 4.15 HTTP/1 core -
-4.16 HTTP/2 - 4.17 transparent - 5 client (5.1 CLI, 5.2 behavior, 5.3 naming, 5.4 output) - 6 config - 7 logging - 8 Splunk -
+4.16 HTTP/2 - 4.17 transparent - 5 client (5.1 CLI, 5.2 behavior, 5.3 naming, 5.4 output) - 6 config - 7 logging - 8 SIEM (OpenSearch) -
 9 non-functional - 10 repo conventions. v1.1 sections live in SPEC_EXT_POLICY (P1-P4), SPEC_EXT_OPS (O1-O8), SPEC_EXT_CLIENT (C1-C5).
 
 ## ID prefixes
 D decision, R research, T threat, U unit/URL corpus, P property, F fuzz, X cross-parser differential (TEST_PLAN 4b), I integration,
-E end-to-end, L load, C compatibility, S Splunk, SM smuggling corpus, PT pentest, PF pentest finding, AR accepted risk, H/R rules in SPEC.
+E end-to-end, L load, C compatibility, S SIEM, SM smuggling corpus, PT pentest, PF pentest finding, AR accepted risk, H/R rules in SPEC.

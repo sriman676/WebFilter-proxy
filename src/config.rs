@@ -68,6 +68,9 @@ pub enum OnError {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
+    /// Absolute path of the file this config was loaded from (set by `load`).
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
     /// Enforcement mode.
     pub mode: Mode,
     /// Proxy listen address; non-loopback requires `proxy_auth` (D-13).
@@ -138,6 +141,7 @@ impl Default for Config {
             log_query_values: false,
             upstream_keepalive: false,
             block_non_tls_connect: true,
+            source: None,
             limits: LimitsConfig::default(),
             timeouts: TimeoutsConfig::default(),
             ports: PortConfig::default(),
@@ -405,6 +409,33 @@ fn enabled_default() -> bool {
     true
 }
 
+impl BlocklistConfig {
+    /// Every list file: the default lists, then each category's (empty paths included).
+    pub fn files(&self) -> impl Iterator<Item = &PathBuf> {
+        [&self.domains, &self.url_patterns, &self.ip_blocklist]
+            .into_iter()
+            .chain(self.categories.iter().flat_map(CategoryConfig::files))
+    }
+}
+
+/// Paths among `files` that are world-writable (PT-5.4); anyone could change policy through them.
+pub fn world_writable<'a>(files: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        files
+            .into_iter()
+            .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o002 != 0))
+            .map(|p| p.display().to_string())
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = files;
+        Vec::new()
+    }
+}
+
 impl CategoryConfig {
     /// The category's list files (empty paths for kinds it does not use).
     pub fn files(&self) -> [&PathBuf; 3] {
@@ -657,7 +688,20 @@ impl Config {
         let abs = std::path::absolute(path).map_err(read_err)?;
         let base = abs.parent().unwrap_or(Path::new("/"));
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        Self::parse(&text, base, home.as_deref())
+        let mut cfg = Self::parse(&text, base, home.as_deref())?;
+        cfg.source = Some(abs);
+        Ok(cfg)
+    }
+
+    /// Files whose tampering changes policy: the config itself, every list and the block page.
+    pub fn policy_files(&self) -> Vec<&Path> {
+        self.source
+            .iter()
+            .chain(self.blocklists.files())
+            .chain(std::iter::once(&self.block_page.template))
+            .map(PathBuf::as_path)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect()
     }
 
     /// Parse TOML text, resolve relative paths against `base_dir` and `~` against `home`,

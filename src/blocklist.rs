@@ -552,9 +552,7 @@ impl BlocklistHandle {
     }
 
     fn stamp_of(cfg: &BlocklistConfig) -> Stamp {
-        [&cfg.domains, &cfg.url_patterns, &cfg.ip_blocklist]
-            .into_iter()
-            .chain(cfg.categories.iter().flat_map(|c| c.files()))
+        cfg.files()
             .map(|p| std::fs::metadata(p).ok().and_then(|m| Some((m.len(), m.modified().ok()?))))
             .collect()
     }
@@ -593,11 +591,14 @@ impl BlocklistHandle {
             loop {
                 tick.tick().await;
                 match me.reload_if_changed() {
-                    Some(ReloadOutcome::Reloaded(r)) => sys.event(
-                        SysEvent::BlocklistLoaded,
-                        serde_json::json!({"domains": r.domains, "regexes": r.regexes, "ips": r.ips,
-                            "duplicates": r.duplicates, "warnings": r.warnings}),
-                    ),
+                    Some(ReloadOutcome::Reloaded(r)) => {
+                        sys.event(
+                            SysEvent::BlocklistLoaded,
+                            serde_json::json!({"domains": r.domains, "regexes": r.regexes, "ips": r.ips,
+                                "duplicates": r.duplicates, "warnings": r.warnings}),
+                        );
+                        sys.insecure_files(me.cfg.files().map(PathBuf::as_path));
+                    }
                     Some(ReloadOutcome::Failed(e)) => {
                         sys.event(SysEvent::BlocklistReloadFailed, serde_json::json!({"error": e}))
                     }

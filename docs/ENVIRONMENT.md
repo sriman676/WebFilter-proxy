@@ -21,7 +21,7 @@ Ubuntu 22.04+/Debian 12+ or macOS 13+. (Windows unsupported - D-01.)
 | slowhttptest | slowloris / slow body tests | apt/brew |
 | testssl.sh and/or sslyze | TLS config scan of the interception listener | git clone / pip |
 | gitleaks | secrets scan | brew/apt/release binary |
-| Docker | Splunk Enterprise container for E-28/P5 | docker.com |
+| Docker | OpenSearch + Fluent Bit containers for E-28/P5 (A-14), ClamAV in P10 | docker.com |
 | nmap (self-scan of loopback only) | open-port / proxy exposure check | apt/brew |
 | h2spec, nghttp2-client (`nghttp`, `h2load`), socat | HTTP/2 conformance, h2 load, CONNECT forwarding for h2spec | apt/brew, h2spec release binary |
 | iproute2 (`ip`), nftables (`nft`), sudo (Linux only) | transparent-mode netns lab (`just e2e-netns`) | apt |
@@ -34,7 +34,7 @@ Ubuntu 22.04+/Debian 12+ or macOS 13+. (Windows unsupported - D-01.)
 | Proxy under test | `127.0.0.1:18080` (tests also use ephemeral ports) |
 | Test origin servers | `127.0.0.1:18081-18089` (HTTP and HTTPS variants, see TEST_PLAN harness) |
 | Test DNS resolver (rebinding simulator) | injected resolver trait, no real DNS server needed |
-| Splunk (Docker) | web 8000, HEC 8088, receiver 9997 on 127.0.0.1 |
+| OpenSearch (Docker) | 9200 (HTTPS, security plugin on), Dashboards 5601, on 127.0.0.1 |
 | Safe test domains | `blocked-test.example`, `malware-test.invalid`, `ads.example.net` (resolved by the injected resolver / hosts mapping in tests) |
 
 ## Transparent-mode lab (Phase 7, Linux, needs sudo)
@@ -67,7 +67,7 @@ RUST_PIN=1.99.0
 | cargo tools (nextest, llvm-cov, deny, audit, fuzz, geiger, cyclonedx) | install with `--locked`; record versions | fill in Phase 0 |
 | clamav container image | exact tag chosen in Phase 10 and recorded (never `latest`) | fill in Phase 10 |
 | promtool, headless browser | latest release at Phase 11; record versions | fill in Phase 11 |
-| Splunk container image | exact tag chosen in Phase 5 and recorded (never `latest`) | fill in Phase 5 |
+| SIEM container images | `opensearchproject/opensearch:2.19.1`, `opensearch-dashboards:2.19.1`, `fluent/fluent-bit:3.1.9` (siem/opensearch/docker-compose.yml) | Phase 5 |
 
 ### Expected crate majors (verify; may have changed)
 tokio 1.x, httparse 1.x, rustls 0.23.x, tokio-rustls 0.26.x, rcgen (API differs between 0.1x releases: always read the docs

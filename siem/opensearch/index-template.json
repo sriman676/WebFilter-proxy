@@ -1,0 +1,165 @@
+{
+ "index_patterns": [
+  "webfilter-requests*"
+ ],
+ "priority": 200,
+ "template": {
+  "settings": {
+   "number_of_shards": 1,
+   "number_of_replicas": 0
+  },
+  "mappings": {
+   "dynamic": "false",
+   "properties": {
+    "timestamp": {
+     "type": "date",
+     "format": "strict_date_optional_time"
+    },
+    "event_id": {
+     "type": "keyword"
+    },
+    "event_type": {
+     "type": "keyword"
+    },
+    "src_ip": {
+     "type": "ip"
+    },
+    "src_port": {
+     "type": "long"
+    },
+    "http_method": {
+     "type": "keyword"
+    },
+    "url": {
+     "type": "keyword",
+     "ignore_above": 2048
+    },
+    "url_scheme": {
+     "type": "keyword"
+    },
+    "dest_host": {
+     "type": "keyword"
+    },
+    "dest_ip": {
+     "type": "ip"
+    },
+    "dest_port": {
+     "type": "long"
+    },
+    "uri_path": {
+     "type": "keyword",
+     "ignore_above": 2048
+    },
+    "uri_query_keys": {
+     "type": "keyword"
+    },
+    "status": {
+     "type": "long"
+    },
+    "action": {
+     "type": "keyword"
+    },
+    "would_block": {
+     "type": "boolean"
+    },
+    "reason": {
+     "type": "keyword"
+    },
+    "rule_id": {
+     "type": "keyword"
+    },
+    "rule_list": {
+     "type": "keyword"
+    },
+    "user_agent": {
+     "type": "keyword",
+     "ignore_above": 2048
+    },
+    "http_content_type": {
+     "type": "keyword"
+    },
+    "http_version": {
+     "type": "keyword"
+    },
+    "bytes_in": {
+     "type": "long"
+    },
+    "bytes_out": {
+     "type": "long"
+    },
+    "duration_ms": {
+     "type": "long"
+    },
+    "tls_intercepted": {
+     "type": "boolean"
+    },
+    "tls_sni": {
+     "type": "keyword"
+    },
+    "ech_present": {
+     "type": "boolean"
+    },
+    "alpn": {
+     "type": "keyword"
+    },
+    "h2_stream_id": {
+     "type": "long"
+    },
+    "transparent": {
+     "type": "boolean"
+    },
+    "orig_dst_ip": {
+     "type": "ip"
+    },
+    "orig_dst_port": {
+     "type": "long"
+    },
+    "host_verified": {
+     "type": "boolean"
+    },
+    "upgrade": {
+     "type": "keyword"
+    },
+    "suspicious_encoding": {
+     "type": "boolean"
+    },
+    "client_id": {
+     "type": "keyword"
+    },
+    "profile": {
+     "type": "keyword"
+    },
+    "throttled": {
+     "type": "boolean"
+    },
+    "scan_status": {
+     "type": "keyword"
+    },
+    "scan_engine": {
+     "type": "keyword"
+    },
+    "scan_signature": {
+     "type": "keyword"
+    },
+    "body_sha256": {
+     "type": "keyword"
+    },
+    "body_bytes": {
+     "type": "long"
+    },
+    "download_name": {
+     "type": "keyword"
+    },
+    "proxy_user": {
+     "type": "keyword"
+    },
+    "error": {
+     "type": "keyword"
+    },
+    "proxy_mode": {
+     "type": "keyword"
+    }
+   }
+  }
+ }
+}

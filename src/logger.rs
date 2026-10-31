@@ -248,6 +248,7 @@ pub enum SysEvent {
     PolicyReloaded,
     H2Flood,
     OrigDstFailed,
+    InsecurePermissions,
 }
 
 /// Recursively clean every string in a JSON value (keys and values).
@@ -305,6 +306,14 @@ impl SystemLog {
     /// Log a system event (never blocks; dropped and counted when the queue is full).
     pub fn event(&self, kind: SysEvent, detail: Value) {
         self.0.send(Target::System, system_line(kind, detail));
+    }
+
+    /// Emit `insecure_permissions` when any of `files` is world-writable (PT-5.4).
+    pub fn insecure_files<'a>(&self, files: impl IntoIterator<Item = &'a std::path::Path>) {
+        let bad = crate::config::world_writable(files);
+        if !bad.is_empty() {
+            self.event(SysEvent::InsecurePermissions, json!({ "files": bad }));
+        }
     }
 }
 
