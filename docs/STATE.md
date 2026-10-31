@@ -1,16 +1,17 @@
 # Project State (update at every gate; first file read when resuming)
-Current phase: 1 (not started)
+Current phase: 2 (in progress in worktree ../webfilter-proxy-p2, branch phase/2-proxy; 2a+2b built, 2c mostly built)
 Milestone tags: none (M1 = Phases 0-3)
-Last green commit: phase-0-complete (branch `phase/0-scaffold`)
-Open findings: none Critical/High. Deferred: PF-0-13 (CA dir owner/O_NOFOLLOW, Phase 4), PF-0-14 (insecure-test sentinel, Phase 1)
-Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`), A-11/A-15. Splunk is replaced by OpenSearch (A-14).
-Before each gate: run a simplification pass (A-13).
-Next action: execute docs/phases/PHASE-1.md
+Last green commit: phase-1-complete
+Open findings: none Critical/High. Deferred: PF-0-13 (Phase 4), PF-0-14 (Phase 1->2 sentinel)
+Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`; Phase 2 uses CARGO_TARGET_DIR=~/wf-target-p2).
+User decisions taken up front: A-24..A-28 (customization, OpenSearch, scanners, Phase 7 at end, merge to main at end).
+Before each gate: simplification pass (A-13). After each gate: notify and continue (no stopping).
+Next action: finish Phase 2 (security tests, pentest-p2, review, gate), then Phase 3.
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
 | 0 | done | 2026-10-30 | phase-0-complete | 34 tests, cov 97%, pentest-p0 PASS |
-| 1 | todo | | | |
+| 1 | done | 2026-10-31 | phase-1-complete | 100 tests, cov 93.7%, pentest-p1 PASS, PF-1-01..13 fixed |
 | 2 | todo | | | |
 | 3 | todo | | | |
 | 4 | todo | | | |
