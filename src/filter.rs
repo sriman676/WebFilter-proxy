@@ -187,6 +187,25 @@ pub fn evaluate_at(
 }
 
 /// Rules 2-4 against one list triple for the given phase.
+/// [`evaluate_at`] with a profile (D-50): its effective rules and mode, then its extra lists.
+/// Profiles only change list rules; safety policy is checked elsewhere and never here.
+pub fn evaluate_profile(
+    t: &NormalizedTarget,
+    phase: Phase<'_>,
+    lists: &Blocklists,
+    profile: &crate::profiles::Profile,
+    now: time::OffsetDateTime,
+) -> Decision {
+    let d = evaluate_at(t, phase, lists, &profile.rules, profile.mode, now);
+    if d.reason != Reason::None {
+        return d;
+    }
+    let Some(extra) = &profile.extra else { return d };
+    let files = [extra.files[0].as_str(), extra.files[1].as_str(), extra.files[2].as_str()];
+    match_lists(t, phase, (&extra.domains, &extra.patterns, &extra.ips), files, profile.mode)
+        .unwrap_or(d)
+}
+
 fn match_lists(
     t: &NormalizedTarget,
     phase: Phase<'_>,

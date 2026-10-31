@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -48,39 +49,60 @@ struct Entry {
     locked_until: Option<Instant>,
 }
 
-/// Lockout key: IPv4 (mapped IPv6 folded) or the IPv6 /64, so rotating addresses inside one
-/// /64 does not reset the counter (PF-1-05, as D-50).
-fn key(ip: IpAddr) -> IpAddr {
-    match crate::normalize::fold_ip(ip) {
-        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !((1u128 << 64) - 1)).into()),
-        v4 => v4,
+/// What a lockout counter is keyed by.
+pub trait LockKey: Eq + Hash + Clone {
+    /// The canonical key.
+    fn lock_key(self) -> Self;
+}
+
+/// IPv4 (mapped IPv6 folded) or the IPv6 /64, so rotating addresses inside one /64 does not reset
+/// the counter (PF-1-05, as D-50).
+impl LockKey for IpAddr {
+    fn lock_key(self) -> Self {
+        match crate::normalize::fold_ip(self) {
+            IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !((1u128 << 64) - 1)).into()),
+            v4 => v4,
+        }
     }
 }
 
-/// Per-client failure counter with lockout. Time is passed in so tests are deterministic.
-#[derive(Debug, Default)]
-pub struct Lockout {
-    map: Mutex<HashMap<IpAddr, Entry>>,
+/// Per-user counters (PT-9.7); unknown names are counted too, so lockout reveals nothing.
+impl LockKey for String {
+    fn lock_key(self) -> Self {
+        self
+    }
 }
 
-impl Lockout {
-    fn active(map: &HashMap<IpAddr, Entry>, now: Instant) -> usize {
+/// Per-key failure counter with lockout. Time is passed in so tests are deterministic.
+#[derive(Debug)]
+pub struct Lockout<K = IpAddr> {
+    map: Mutex<HashMap<K, Entry>>,
+}
+
+impl<K> Default for Lockout<K> {
+    fn default() -> Self {
+        Self { map: Mutex::new(HashMap::new()) }
+    }
+}
+
+impl<K: LockKey> Lockout<K> {
+    fn active(map: &HashMap<K, Entry>, now: Instant) -> usize {
         map.values().filter(|e| e.locked_until.is_some_and(|u| now < u)).count()
     }
 
     /// Whether `ip` is locked out. When the table is full of active lockouts, unknown clients
     /// are treated as locked (fail closed).
-    pub fn is_locked(&self, ip: IpAddr, now: Instant) -> bool {
+    pub fn is_locked(&self, k: K, now: Instant) -> bool {
         let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(&key(ip)) {
+        match map.get(&k.lock_key()) {
             Some(e) => e.locked_until.is_some_and(|until| now < until),
             None => map.len() >= MAX_TRACKED && Self::active(&map, now) >= MAX_TRACKED,
         }
     }
 
     /// Record a failed attempt; returns true when this failure starts a lockout.
-    pub fn record_failure(&self, ip: IpAddr, now: Instant) -> bool {
-        let ip = key(ip);
+    pub fn record_failure(&self, k: K, now: Instant) -> bool {
+        let ip = k.lock_key();
         let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() >= MAX_TRACKED && !map.contains_key(&ip) {
             map.retain(|_, e| e.locked_until.is_some_and(|u| now < u)); // drop expired/partial counters
@@ -101,7 +123,7 @@ impl Lockout {
     }
 
     /// Clear the counter after a successful login.
-    pub fn record_success(&self, ip: IpAddr) {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&key(ip));
+    pub fn record_success(&self, k: K) {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&k.lock_key());
     }
 }

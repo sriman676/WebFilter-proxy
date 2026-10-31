@@ -173,3 +173,30 @@ per_client_per_hour = 3
 
 [state]
 dir = "../state"
+
+# ---- v1.1: users, client networks and profiles (Phase 9, D-50/D-51). OFF unless configured. ----
+# Identity: user:<name> when authenticated, else ip:<addr> (IPv6 per /64); X-Forwarded-For is ignored.
+# Profiles add lists/allowlists/limits; they never loosen validation, ports, destinations or TLS.
+# [[users]]                        # any user makes proxy authentication required
+# username = "alice"               # [A-Za-z0-9._-]{1,64}
+# password_hash = "$argon2id$..."  # webfilter-proxy hash-password
+# profile = "kids"
+#
+# [[clients]]                      # longest prefix wins; users override
+# cidr = "192.168.1.0/24"
+# profile = "kids"
+#
+# [[profiles]]
+# name = "kids"                    # "default" may be declared to customize everyone else
+# extra_blocked_domains = ["games.example"]
+# extra_url_patterns = []
+# allow_domains = []
+# [profiles.rate]                  # omit for no limits; missing keys use these defaults
+# requests_per_sec = 50
+# burst = 100
+# max_concurrent_connections = 64
+# max_inflight_requests = 128
+# max_tunnels = 32
+# down_bytes_per_sec = 0           # 0 = unlimited, else >= 4096 (delays bytes, never drops)
+# up_bytes_per_sec = 0
+# daily_quota_bytes = 0            # 0 = off; counters reset at UTC midnight and on restart

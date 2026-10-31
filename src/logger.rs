@@ -553,9 +553,21 @@ pub struct Stats {
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
     h2_flood: AtomicU64,
+    limits: Mutex<std::collections::BTreeMap<String, LimitCounts>>,
     /// Currently open client connections.
     pub active_connections: AtomicU64,
     top: Mutex<HashMap<String, u64>>,
+}
+
+/// Limit rejections of one profile in a stats window.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct LimitCounts {
+    /// 429 `rate_limited` (rate, in-flight, tunnels).
+    pub rate_limited: u64,
+    /// 429 `quota_exceeded`.
+    pub quota_exceeded: u64,
+    /// 503 `too_many_connections`.
+    pub too_many_connections: u64,
 }
 
 /// `top_blocked` entry.
@@ -594,6 +606,7 @@ pub struct StatsEvent {
     pub active_connections: u64,
     pub dropped_log_events: u64,
     pub h2_flood: u64,
+    pub limits: std::collections::BTreeMap<String, LimitCounts>,
     pub top_blocked: Vec<HostCount>,
     pub lists: ListCounts,
 }
@@ -621,6 +634,21 @@ impl Stats {
     /// Count an error response.
     pub fn record_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count a limit rejection for `profile` (SPEC_EXT_POLICY P2; profiles are bounded, <= 100).
+    pub fn record_limit(&self, profile: &str, reason: crate::reason::Reason) {
+        use crate::reason::Reason as R;
+        let mut map = self.limits.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= 128 && !map.contains_key(profile) {
+            return;
+        }
+        let c = map.entry(clean(profile, 32)).or_default();
+        match reason {
+            R::QuotaExceeded => c.quota_exceeded += 1,
+            R::TooManyConnections => c.too_many_connections += 1,
+            _ => c.rate_limited += 1,
+        }
     }
 
     /// Count an HTTP/2 connection closed by the flood guard (D-45).
@@ -651,6 +679,7 @@ impl Stats {
             active_connections: self.active_connections.load(Ordering::Relaxed),
             dropped_log_events: dropped,
             h2_flood: take(&self.h2_flood),
+            limits: std::mem::take(&mut *self.limits.lock().unwrap_or_else(|e| e.into_inner())),
             top_blocked: top,
             lists,
         }

@@ -337,13 +337,26 @@ async fn exchange(
     let t = target(&parts, &c.tunnel)?;
     note_target(ev, &t);
     ev.dest_ip = Some(c.dest_ip.to_string());
-    let d = deps.evaluate(&t, Phase::PreDns);
+    let profile = &c.tunnel.profile;
+    ev.client_id = Some(c.tunnel.client_id.clone());
+    ev.profile = Some(profile.name.clone());
+    let _inflight = match deps.admit(&c.tunnel.client_id, profile) {
+        Ok(permit) => permit,
+        Err(r) => {
+            let html = error_html(r.status, r.reason, &ev.event_id);
+            let extra = [("retry-after", r.retry_after.to_string())];
+            let _ = send_page(respond, r.status, r.reason, &ev.event_id, html, &extra);
+            note_fail(ev, &fail(r.status, r.reason, "limit exceeded"));
+            return Ok(());
+        }
+    };
+    let d = deps.evaluate(&t, Phase::PreDns, profile);
     note_decision(ev, &d);
     if d.is_block() {
         send_block(respond, ev, &d, deps).await;
         return Ok(());
     }
-    if let Some(d) = resolved_rule(deps, &t, &c.tunnel.ips) {
+    if let Some(d) = resolved_rule(deps, &t, &c.tunnel.ips, profile) {
         note_decision(ev, &d);
         if d.is_block() {
             send_block(respond, ev, &d, deps).await;
@@ -384,7 +397,8 @@ async fn exchange(
         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
     ev.http_content_type =
         content_type.as_deref().map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
-    let d = deps.evaluate(&t, Phase::ResponseHeaders { content_type: content_type.as_deref() });
+    let phase = Phase::ResponseHeaders { content_type: content_type.as_deref() };
+    let d = deps.evaluate(&t, phase, profile);
     if d.reason != Reason::None {
         note_decision(ev, &d);
     }

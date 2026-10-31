@@ -99,7 +99,7 @@ pentest-p7:
 pentest-p8:
     @echo "TODO: pentest-p8 lands in Phase 8 (PENTEST_PLAN PT-8.x)" >&2; exit 1
 pentest-p9:
-    @echo "TODO: pentest-p9 lands in Phase 9 (PENTEST_PLAN_EXT PT-9.x)" >&2; exit 1
+    scripts/pentest_p9.sh
 pentest-p10:
     @echo "TODO: pentest-p10 lands in Phase 10 (PENTEST_PLAN_EXT PT-10.x)" >&2; exit 1
 pentest-p11:

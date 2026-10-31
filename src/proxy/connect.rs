@@ -16,13 +16,14 @@ use super::http1::{BodyFraming, RequestHead, ResponseHead, forward_headers, writ
 use super::io::fill;
 use super::pipeline::{
     Fail, Outcome, Tunnel, Upstream, UpstreamBox, Via, client_gone, connect_upstream, fail,
-    note_decision, note_target, resolve, resolved_rule, send_block, serve_connection, upstream_tls,
-    write_all,
+    note_decision, note_target, resolve, resolved_rule, send_block, send_limit, serve_connection,
+    upstream_tls, write_all,
 };
 use crate::filter::{Action, Phase};
 use crate::logger::RequestEvent;
 use crate::normalize::{NormalizedTarget, TargetContext, canonicalize};
 use crate::policy::{PortKind, check_port};
+use crate::profiles::Profile;
 use crate::reason::Reason;
 use crate::tls::{ClientHelloInfo, Peek, Prefixed, is_passthrough, peek_client_hello};
 
@@ -73,6 +74,7 @@ where
 }
 
 /// Handle `CONNECT host:port`: policy, rules 1-3, then passthrough or interception.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_connect<S>(
     client: &mut S,
     buf: &mut Vec<u8>,
@@ -80,6 +82,8 @@ pub(crate) async fn handle_connect<S>(
     ev: &mut RequestEvent,
     deps: &Arc<ProxyDeps>,
     peer: IpAddr,
+    id: &str,
+    profile: &Arc<Profile>,
 ) -> Result<Outcome, Fail>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -95,24 +99,34 @@ where
     note_target(ev, &t);
     check_port(PortKind::Connect, t.port, &deps.cfg.ports)
         .map_err(|r| fail(403, r, "port not allowed"))?;
-    let d = deps.evaluate(&t, Phase::ConnectPreDns);
+    let d = deps.evaluate(&t, Phase::ConnectPreDns, profile);
     note_decision(ev, &d);
     if d.is_block() {
         send_block(client, ev, &d, deps).await;
         return Ok(Outcome::Done);
     }
     let ips = resolve(&t, ev, deps).await?;
-    if let Some(d) = resolved_rule(deps, &t, &ips) {
+    if let Some(d) = resolved_rule(deps, &t, &ips, profile) {
         note_decision(ev, &d);
         if d.is_block() {
             send_block(client, ev, &d, deps).await;
             return Ok(Outcome::Done);
         }
     }
+    // Open tunnels per client (D-51); held until the tunnel ends.
+    let _tunnel = match profile.rate.map(|r| deps.limiter.acquire_tunnel(id, &r)) {
+        Some(Err(r)) => {
+            deps.stats.record_limit(&profile.name, r.reason);
+            send_limit(client, ev, &r, deps).await;
+            return Ok(Outcome::Done);
+        }
+        slot => slot,
+    };
     let intercept = deps.leaves.is_some()
         && !is_passthrough(&t.host.to_string(), &deps.cfg.tls.passthrough_domains);
     if intercept {
-        return intercept_tunnel(client, buf, t, ips, ev, deps, peer).await;
+        let who = (id.to_owned(), Arc::clone(profile));
+        return intercept_tunnel(client, buf, t, ips, ev, deps, peer, who).await;
     }
     let (mut upstream, ip) = connect_upstream(&ips, t.port, deps).await?;
     ev.dest_ip = Some(ip.to_string());
@@ -185,6 +199,7 @@ where
 
 /// Interception (SPEC 4.9): answer 200, peek the ClientHello (TLS vs non-TLS, SNI, ECH), check
 /// SNI against the CONNECT host (D-21, D-22), then [`intercept`].
+#[allow(clippy::too_many_arguments)]
 async fn intercept_tunnel<S>(
     client: &mut S,
     buf: &mut Vec<u8>,
@@ -193,6 +208,7 @@ async fn intercept_tunnel<S>(
     ev: &mut RequestEvent,
     deps: &Arc<ProxyDeps>,
     peer: IpAddr,
+    (client_id, profile): (String, Arc<Profile>),
 ) -> Result<Outcome, Fail>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -239,6 +255,8 @@ where
         user: ev.proxy_user.clone(),
         orig_dst: None,
         host_verified: None,
+        client_id,
+        profile,
     };
     intercept(client, buf, hello, tunnel, ev, deps, SocketAddr::new(peer, ev.src_port)).await
 }

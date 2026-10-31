@@ -2,6 +2,16 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-9-complete] - 2026-10-31 - Phase 9: identity, profiles, rate limits, quotas (pentest in the final run, A-29)
+### Added
+- `[[users]]`, `[[clients]]`, `[[profiles]]` (D-50): per-request `client_id`, longest-prefix CIDR profiles,
+  profile lists/allowlists/overrides that never touch safety policy, hot reload (SIGHUP/mtime) with rollback.
+- `limiter` (D-51): requests/s + burst, in-flight, connections, tunnels, daily quota (429/503 + Retry-After),
+  shared per-client bandwidth caps that delay bytes; enforced in monitor mode; per-profile stats.
+- Multi-user auth with per-user lockout and equal-cost unknown users. Fuzz F-13 and `limiter`; `just pentest-p9`.
+### Fixed
+- PF-9-01: slow start delayed signal handling.
+
 ## [phase-8-complete] - 2026-10-31 - Phase 8: hardening, performance, release (pentest in the final run, A-29)
 ### Added
 - `just load` (offline load generator, L-01..L-05; D-34 met with wide margins), `just compat` (C-01..C-09),

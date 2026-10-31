@@ -266,6 +266,14 @@ async fn tls_flow(
 ) -> Result<Outcome, Fail> {
     let cfg = &deps.cfg.transparent;
     let refuse = |reason: Reason, error: &'static str| Fail { status: None, reason, error };
+    let (client_id, profile) = deps.identify(peer.ip(), None, ev);
+    let _tunnel = match profile.rate.map(|r| deps.limiter.acquire_tunnel(&client_id, &r)) {
+        Some(Err(r)) => {
+            deps.stats.record_limit(&profile.name, r.reason);
+            return Err(refuse(r.reason, "too many tunnels"));
+        }
+        slot => slot,
+    };
     check_port(PortKind::Connect, orig.port(), &deps.cfg.ports)
         .map_err(|r| refuse(r, "port not allowed"))?;
     deps.policy
@@ -305,7 +313,7 @@ async fn tls_flow(
         let t = canonicalize(&authority(&ip.to_string()), TargetContext::ConnectAuthority)
             .map_err(|e| refuse(e.reason(), "invalid original destination"))?;
         note_target(ev, &t);
-        let d = deps.evaluate(&t, Phase::Resolved { ip });
+        let d = deps.evaluate(&t, Phase::Resolved { ip }, &profile);
         note_decision(ev, &d);
         if d.is_block() {
             return Ok(Outcome::Done);
@@ -317,13 +325,13 @@ async fn tls_flow(
         .map_err(|e| refuse(e.reason(), "invalid SNI"))?;
     note_target(ev, &t);
     ev.url_scheme = "https".into();
-    let d = deps.evaluate(&t, Phase::ConnectPreDns);
+    let d = deps.evaluate(&t, Phase::ConnectPreDns, &profile);
     note_decision(ev, &d);
     if d.is_block() {
         return Ok(Outcome::Done); // nothing can be shown before the handshake: close
     }
     verify_host(&t, ip, ev, deps).await?;
-    if let Some(d) = resolved_rule(deps, &t, &[ip]) {
+    if let Some(d) = resolved_rule(deps, &t, &[ip], &profile) {
         note_decision(ev, &d);
         if d.is_block() {
             return Ok(Outcome::Done);
@@ -341,6 +349,8 @@ async fn tls_flow(
             user: None,
             orig_dst: Some(orig),
             host_verified: ev.host_verified,
+            client_id,
+            profile,
         };
         return intercept(client, buf, hello, tunnel, ev, deps, peer).await;
     }

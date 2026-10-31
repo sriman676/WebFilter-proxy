@@ -331,11 +331,15 @@ fn pf_0_06_oversized_or_non_regular_config_file_rejected() {
 }
 
 #[test]
-fn pf_0_07_v11_placeholder_sections_redacted_in_debug() {
+fn pf_0_07_user_hashes_redacted_in_debug_and_errors() {
     let lab = Lab::new();
-    let cfg =
-        parse_in(&lab, "[[users]]\nusername = \"u\"\npassword_hash = \"TOPSECRET\"\n").unwrap();
-    assert!(!format!("{cfg:?}").contains("TOPSECRET"));
+    let hash = webfilter::auth::hash_password(b"pw").unwrap();
+    let users = format!("[[users]]\nusername = \"u\"\npassword_hash = \"{hash}\"\n");
+    let cfg = parse_in(&lab, &users).unwrap();
+    assert!(!format!("{cfg:?}").contains(&hash));
+    let err =
+        parse_in(&lab, "[[users]]\nusername = \"u\"\npassword_hash = \"TOPSECRET\"\n").unwrap_err();
+    assert!(!err.to_string().contains("TOPSECRET"));
 }
 
 // ---- PT-1.5: config abuse -> clean error, never a panic ----
