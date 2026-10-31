@@ -2,6 +2,18 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-2-complete] - 2026-10-31 - Phase 2: proxy server (built + tested; pentest in the final run, A-29)
+### Added
+- `proxy::http1` strict HTTP/1 core (R1-R15, shared framing, chunked re-encoding, httparse cross-check), `compat` switch (A-25).
+- Pipeline (SPEC 4.2): validation, auth (argon2 off-thread, cache, lockout), canonicalization, port/destination policy,
+  pre-DNS filtering, resolve-once, rule 3, fresh upstream per request, 100-continue, response rule 6, keep-alive/pipelining.
+- CONNECT passthrough, websocket relay, connection limits (503), panic isolation, stats, graceful shutdown and signals
+  (SIGINT/SIGTERM drain, SIGHUP reload, SIGUSR1 reopen), CLI overrides `--listen/--mode/--log-dir`, default `run`.
+- Customization: custom block page template (A-26); named blocklist categories with time schedules (A-27).
+- Tests: 172 (http1 rules, X-01 vs hyper, integration I-01..I-28, PT-2 regressions, categories/schedules); fuzz F-04/F-08/F-09.
+### Fixed
+- Websocket `Upgrade` stripped when named in `Connection` (found by I-17).
+
 ## [phase-1-complete] - 2026-10-31 - Phase 1: core library
 ### Added
 - `normalize` (SPEC 4.5, dual-parser differential), `blocklist` (grammar, limits, hot reload), `filter` (rule order, monitor),

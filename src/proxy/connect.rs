@@ -13,8 +13,8 @@ use tokio::time::{Instant, timeout};
 use super::ProxyDeps;
 use super::http1::{BodyFraming, RequestHead, ResponseHead, forward_headers, write_head};
 use super::pipeline::{
-    Fail, Outcome, connect_upstream, fail, note_decision, note_target, resolve, send_block,
-    write_all,
+    Fail, Outcome, client_gone, connect_upstream, fail, note_decision, note_target, resolve,
+    send_block, write_all,
 };
 use crate::filter::Phase;
 use crate::logger::RequestEvent;
@@ -110,20 +110,40 @@ where
     }
     let (mut upstream, ip) = connect_upstream(&ips, t.port, deps).await?;
     ev.dest_ip = Some(ip.to_string());
-    let idle = Duration::from_secs(deps.cfg.timeouts.tunnel_idle);
-    write_all(client, b"HTTP/1.1 200 Connection Established\r\n\r\n", idle)
-        .await
-        .map_err(|_| Fail { status: None, reason: Reason::None, error: "client closed" })?;
     ev.status = 200;
-    if !buf.is_empty() {
-        // Bytes the client sent right after the CONNECT head belong to the tunnel.
-        let early = std::mem::take(buf);
-        let _ = write_all(&mut upstream, &early, idle).await;
-        ev.bytes_out += early.len() as u64;
+    open_tunnel(
+        client,
+        buf,
+        &mut upstream,
+        b"HTTP/1.1 200 Connection Established\r\n\r\n",
+        ev,
+        deps,
+    )
+    .await
+}
+
+/// Send `answer` to the client, forward bytes the client already sent after its head (they
+/// belong to the tunnel), then relay both ways until close or idle.
+async fn open_tunnel<S>(
+    client: &mut S,
+    buf: &mut Vec<u8>,
+    upstream: &mut TcpStream,
+    answer: &[u8],
+    ev: &mut RequestEvent,
+    deps: &ProxyDeps,
+) -> Result<Outcome, Fail>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let idle = Duration::from_secs(deps.cfg.timeouts.tunnel_idle);
+    write_all(client, answer, idle).await.map_err(|_| client_gone())?;
+    let early = std::mem::take(buf);
+    if !early.is_empty() {
+        let _ = write_all(upstream, &early, idle).await;
     }
-    let (out, inn) = relay(client, &mut upstream, idle).await;
-    ev.bytes_out += out;
-    ev.bytes_in = inn;
+    let (out, inn) = relay(client, upstream, idle).await;
+    ev.bytes_out += early.len() as u64 + out;
+    ev.bytes_in += inn;
     Ok(Outcome::Done)
 }
 
@@ -151,19 +171,6 @@ where
         &mut out,
     );
     out.extend_from_slice(&up_buf);
-    let idle = Duration::from_secs(deps.cfg.timeouts.tunnel_idle);
-    write_all(client, &out, idle).await.map_err(|_| Fail {
-        status: None,
-        reason: Reason::None,
-        error: "client closed",
-    })?;
     ev.status = 101;
-    if !buf.is_empty() {
-        let early = std::mem::take(buf);
-        let _ = write_all(&mut upstream, &early, idle).await;
-    }
-    let (out, inn) = relay(client, &mut upstream, idle).await;
-    ev.bytes_out += out;
-    ev.bytes_in += inn;
-    Ok(Outcome::Done)
+    open_tunnel(client, buf, &mut upstream, &out, ev, deps).await
 }
