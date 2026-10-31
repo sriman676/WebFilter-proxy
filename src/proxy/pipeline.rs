@@ -383,7 +383,7 @@ where
     Ok(Outcome::Forwarded { keep_alive })
 }
 
-fn client_gone() -> Fail {
+pub(crate) fn client_gone() -> Fail {
     Fail { status: None, reason: Reason::None, error: "client connection closed" }
 }
 
