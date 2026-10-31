@@ -2,6 +2,15 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-3-complete] - 2026-10-31 - Phase 3: client (M1 complete; pentest in the final run, A-29)
+### Added
+- `webfilter-client` (hyper 1.x, D-25/D-26): explicit proxy, manual CONNECT with block detection, always-verified TLS
+  (+ `--ca-cert`), per-hop redirect validation, caps, atomic no-clobber saves, `--json`, exit codes 0/1/2/3,
+  proxy auth via env/file only. `scripts/demo.sh` (ACCEPTANCE Part B) and `just demo`. Fuzz F-05/F-06.
+- Test harness: `TestPki` (CA, wrong-name, expired, foreign-CA leaves) and TLS origins.
+### Fixed
+- PF-3-01: origins could forge `X-WebFilter-*` block headers through the proxy.
+
 ## [phase-2-complete] - 2026-10-31 - Phase 2: proxy server (built + tested; pentest in the final run, A-29)
 ### Added
 - `proxy::http1` strict HTTP/1 core (R1-R15, shared framing, chunked re-encoding, httparse cross-check), `compat` switch (A-25).

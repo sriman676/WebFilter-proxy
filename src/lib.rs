@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod blocklist;
+pub mod client;
 pub mod config;
 pub mod filter;
 pub mod logger;

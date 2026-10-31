@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 /// A temporary lab directory holding a config file and empty blocklists.
@@ -138,8 +139,8 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Read one request: head, then a Content-Length or chunked body (naive, independent parser).
-async fn read_request(
-    s: &mut TcpStream,
+async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
     buf: &mut Vec<u8>,
     interim: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
@@ -181,8 +182,53 @@ async fn read_request(
     }
 }
 
+/// Serve requests on one connection until EOF (a proxy must never reuse it, D-07).
+async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
+    mut s: S,
+    rec: Arc<Mutex<Vec<Vec<u8>>>>,
+    handler: Handler,
+) {
+    let mut buf = Vec::new();
+    while let Some(req) = read_request(&mut s, &mut buf, |h| handler(h).interim).await {
+        rec.lock().unwrap().push(req.clone());
+        let reply = handler(&req);
+        tokio::time::sleep(reply.delay).await;
+        if s.write_all(&reply.bytes).await.is_err() {
+            return;
+        }
+        if reply.echo {
+            let (mut r, mut w) = tokio::io::split(s);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+            return;
+        }
+    }
+    let _ = s.shutdown().await;
+}
+
 impl Origin {
     pub async fn start(handler: impl Fn(&[u8]) -> Reply + Send + Sync + 'static) -> Self {
+        Self::start_inner(None, handler).await
+    }
+
+    /// An HTTPS origin presenting `certs` (TLS 1.2/1.3, ring provider).
+    pub async fn start_tls(
+        certs: (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>),
+        handler: impl Fn(&[u8]) -> Reply + Send + Sync + 'static,
+    ) -> Self {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(certs.0, certs.1)
+            .unwrap();
+        Self::start_inner(Some(tokio_rustls::TlsAcceptor::from(Arc::new(config))), handler).await
+    }
+
+    async fn start_inner(
+        tls: Option<tokio_rustls::TlsAcceptor>,
+        handler: impl Fn(&[u8]) -> Reply + Send + Sync + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -190,25 +236,16 @@ impl Origin {
         let rec = Arc::clone(&seen);
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = listener.accept().await else { return };
-                let (rec, handler) = (Arc::clone(&rec), Arc::clone(&handler));
+                let Ok((s, _)) = listener.accept().await else { return };
+                let (rec, handler, tls) = (Arc::clone(&rec), Arc::clone(&handler), tls.clone());
                 tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    // keep serving requests on the connection (a proxy must never reuse it, D-07)
-                    while let Some(req) =
-                        read_request(&mut s, &mut buf, |h| handler(h).interim).await
-                    {
-                        rec.lock().unwrap().push(req.clone());
-                        let reply = handler(&req);
-                        tokio::time::sleep(reply.delay).await;
-                        if s.write_all(&reply.bytes).await.is_err() {
-                            return;
+                    match tls {
+                        Some(acceptor) => {
+                            if let Ok(t) = acceptor.accept(s).await {
+                                serve_conn(t, rec, handler).await;
+                            }
                         }
-                        if reply.echo {
-                            let (mut r, mut w) = s.split();
-                            let _ = tokio::io::copy(&mut r, &mut w).await;
-                            return;
-                        }
+                        None => serve_conn(s, rec, handler).await,
                     }
                 });
             }
@@ -218,6 +255,54 @@ impl Origin {
 
     pub fn requests(&self) -> Vec<String> {
         self.seen.lock().unwrap().iter().map(|r| String::from_utf8_lossy(r).into_owned()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Test PKI
+
+/// `TestPki`: a throwaway CA and leaves (valid, wrong-name, expired, untrusted). Never leaves tmp.
+pub struct TestPki {
+    pub ca_pem: String,
+    ca_params: rcgen::CertificateParams,
+    ca_key: rcgen::KeyPair,
+}
+
+impl TestPki {
+    pub fn new() -> Self {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(rcgen::DnType::CommonName, "webfilter test CA");
+        let ca_pem = ca_params.self_signed(&ca_key).unwrap().pem();
+        Self { ca_pem, ca_params, ca_key }
+    }
+
+    /// A leaf for `names`; `expired` sets a validity window in the past.
+    pub fn leaf(
+        &self,
+        names: &[&str],
+        expired: bool,
+    ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(
+            names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        if expired {
+            params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+            params.not_after = rcgen::date_time_ymd(2021, 1, 1);
+        }
+        let issuer = rcgen::Issuer::from_params(&self.ca_params, &self.ca_key);
+        let cert = params.signed_by(&key, &issuer).unwrap();
+        (vec![cert.der().clone()], PrivateKeyDer::Pkcs8(key.serialize_der().into()))
+    }
+
+    /// Write the CA certificate to `dir/ca.pem` (public cert only).
+    pub fn write_ca(&self, dir: &Path) -> PathBuf {
+        let p = dir.join("test-ca.pem");
+        std::fs::write(&p, &self.ca_pem).unwrap();
+        p
     }
 }
 
