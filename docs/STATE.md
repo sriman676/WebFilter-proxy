@@ -1,12 +1,12 @@
 # Project State (update at every gate; first file read when resuming)
-Current phase: 7 (not started)
+Current phase: 8 (not started)
 Milestone tags: m1-complete, m2-complete
-Last green commit: phase-6-complete (pentests deferred to the final consolidated run, A-29)
+Last green commit: phase-7-complete (pentests deferred to the final consolidated run, A-29)
 Open findings: none Critical/High. Deferred: PF-0-14 (insecure-test sentinel)
 Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`).
 User decisions taken up front: A-24..A-29. Flow: build+test every phase, tag, continue; ALL pentesting at the end,
 then full-codebase redundancy cleanup, then merge to main + v1.1.0 (no push).
-Next action: execute docs/phases/PHASE-7.md. Pending user: docker group (siem-e2e, ClamAV), tool command block, Phase 7 netns sudo
+Next action: execute docs/phases/PHASE-8.md. m3-complete after `sudo -E just e2e-netns` with the user. Pending user: docker group (siem-e2e, ClamAV), tool command block, Phase 7 netns sudo
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
@@ -17,7 +17,7 @@ Next action: execute docs/phases/PHASE-7.md. Pending user: docker group (siem-e2
 | 4 | done | 2026-10-31 | phase-4-complete | 197 tests, cov 92.6%; PF-0-13 fixed; pentest deferred (A-29) |
 | 5 | done | 2026-10-31 | phase-5-complete, m2-complete | 201 tests + siem-test, cov 92.6%; siem-e2e SKIP (no Docker access); pentest deferred (A-29) |
 | 6 | done | 2026-10-31 | phase-6-complete | 213 tests, cov 92.8%; PF-6-01 fixed; h2spec pending tools; pentest deferred (A-29) |
-| 7 | todo | | | |
+| 7 | done | 2026-10-31 | phase-7-complete | 227 tests, cov 92.6%, PF-7-01 fixed; netns e2e pending sudo (A-28); pentest deferred (A-29) |
 | 8 | todo | | | |
 | 9 | todo | | | |
 | 10 | todo | | | |

@@ -329,3 +329,21 @@ proptest! {
         prop_assert_eq!(again.origin_form(), line);
     }
 }
+
+#[tokio::test]
+async fn static_resolver_parses_spec_and_is_off_without_env() {
+    use webfilter::policy::{Resolver, StaticResolver, test_hosts_resolver};
+    let r = StaticResolver::parse(
+        "Site.Test=192.0.2.10, site.test=192.0.2.11,bad,x=notanip,v6.test=2001:db8::1",
+    );
+    assert_eq!(
+        r.resolve("SITE.test", 80).await.unwrap(),
+        vec!["192.0.2.10".parse::<std::net::IpAddr>().unwrap(), "192.0.2.11".parse().unwrap()]
+    );
+    assert_eq!(r.resolve("v6.test", 443).await.unwrap().len(), 1);
+    assert!(r.resolve("x", 80).await.is_err(), "malformed entries are skipped");
+    assert!(r.resolve("missing.test", 80).await.is_err());
+    if std::env::var_os("WEBFILTER_TEST_HOSTS").is_none() {
+        assert!(test_hosts_resolver().is_none());
+    }
+}

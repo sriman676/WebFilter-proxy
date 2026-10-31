@@ -385,3 +385,53 @@ pub async fn raw_exchange(addr: SocketAddr, bytes: &[u8], wait: Duration) -> Str
 pub fn status(resp: &str) -> u16 {
     resp.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0)
 }
+
+// ---------------------------------------------------------------------------------------------
+// Hand-built TLS ClientHellos (peek tests, ECH, transparent TLS)
+
+/// A hand-built ClientHello with the given extensions.
+pub fn synthetic_hello(extensions: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let mut ext = Vec::new();
+    for (kind, body) in extensions {
+        ext.extend_from_slice(&kind.to_be_bytes());
+        ext.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        ext.extend_from_slice(body);
+    }
+    let mut hello = vec![0x03, 0x03];
+    hello.extend_from_slice(&[7u8; 32]);
+    hello.extend_from_slice(&[0, 0, 2, 0x13, 0x01, 1, 0]);
+    hello.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+    hello.extend_from_slice(&ext);
+    let mut msg = vec![1, 0, (hello.len() >> 8) as u8, hello.len() as u8];
+    msg.splice(1..2, [(hello.len() >> 16) as u8]);
+    msg.extend_from_slice(&hello);
+    let mut rec = vec![0x16, 0x03, 0x01, (msg.len() >> 8) as u8, msg.len() as u8];
+    rec.extend_from_slice(&msg);
+    rec
+}
+
+/// A server_name extension for `name`.
+pub fn sni_ext(name: &str) -> (u16, Vec<u8>) {
+    let mut entry = vec![0u8];
+    entry.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    entry.extend_from_slice(name.as_bytes());
+    let mut body = (entry.len() as u16).to_be_bytes().to_vec();
+    body.extend_from_slice(&entry);
+    (0x0000, body)
+}
+
+/// A verifying TLS client config that trusts only `ca_pem` and offers `alpn`.
+pub fn client_config(ca_pem: &str, alpn: &[&[u8]]) -> Arc<rustls::ClientConfig> {
+    use rustls::pki_types::pem::PemObject;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from_pem_slice(ca_pem.as_bytes()).unwrap()).unwrap();
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Arc::new(config)
+}

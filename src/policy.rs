@@ -145,6 +145,40 @@ impl Resolver for SystemResolver {
     }
 }
 
+/// `WEBFILTER_TEST_HOSTS="name=ip,name=ip"`: a static resolver for the netns lab (D-44). Only in
+/// `insecure-test` builds; release builds always use the system resolver.
+pub fn test_hosts_resolver() -> Option<std::sync::Arc<dyn Resolver>> {
+    #[cfg(feature = "insecure-test")]
+    if let Ok(spec) = std::env::var("WEBFILTER_TEST_HOSTS") {
+        return Some(std::sync::Arc::new(StaticResolver::parse(&spec)));
+    }
+    None
+}
+
+/// A fixed name table (tests and the netns lab).
+#[derive(Debug, Clone, Default)]
+pub struct StaticResolver(pub std::collections::HashMap<String, Vec<IpAddr>>);
+
+impl StaticResolver {
+    /// Parse `name=ip,name=ip`; malformed entries are skipped.
+    pub fn parse(spec: &str) -> Self {
+        let mut map = std::collections::HashMap::<String, Vec<IpAddr>>::new();
+        for (name, ip) in spec.split(',').filter_map(|kv| kv.split_once('=')) {
+            if let Ok(ip) = ip.trim().parse() {
+                map.entry(name.trim().to_ascii_lowercase()).or_default().push(ip);
+            }
+        }
+        Self(map)
+    }
+}
+
+impl Resolver for StaticResolver {
+    fn resolve<'a>(&'a self, host: &'a str, _port: u16) -> ResolveFuture<'a> {
+        let found = self.0.get(&host.to_ascii_lowercase()).cloned();
+        Box::pin(async move { found.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound)) })
+    }
+}
+
 /// Destination verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyVerdict {

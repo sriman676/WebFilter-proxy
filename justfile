@@ -91,7 +91,7 @@ pentest-p5:
 pentest-p6:
     scripts/pentest_p6.sh
 pentest-p7:
-    @echo "TODO: pentest-p7 lands in Phase 7 (PENTEST_PLAN PT-7.x)" >&2; exit 1
+    scripts/pentest_p7.sh
 pentest-p8:
     @echo "TODO: pentest-p8 lands in Phase 8 (PENTEST_PLAN PT-8.x)" >&2; exit 1
 pentest-p9:
@@ -117,8 +117,9 @@ siem-e2e:
     scripts/siem/siem_e2e.sh
 h2spec:
     scripts/h2spec.sh
+# Linux + root: sudo -E just e2e-netns (D-43).
 e2e-netns:
-    @echo "TODO: e2e-netns lands in Phase 7 (Linux, sudo; D-43)" >&2; exit 1
+    scripts/e2e_netns.sh
 feeds-test:
     @echo "TODO: feeds-test lands in Phase 10 (SPEC_EXT_POLICY P3)" >&2; exit 1
 scan-e2e:

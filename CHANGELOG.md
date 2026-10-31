@@ -2,6 +2,16 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-7-complete] - 2026-10-31 - Phase 7: transparent mode (Linux lab; pentest in the final run, A-29)
+### Added
+- Transparent HTTP and TLS listeners (SPEC 4.17): `OriginalDst` via `SO_ORIGINAL_DST` (`nix`, no unsafe), conntrack
+  fallback, injectable for tests; host verification strict/relaxed; no-SNI/ECH actions; interception reusing the
+  CONNECT path with inner Host bound to SNI; passthrough with ClientHello replay; direct/loop connections closed.
+- `scripts/netns_lab.sh` (idempotent `up|down|status`, table `inet wf_lab`), `just e2e-netns`, `just pentest-p7`,
+  fuzz F-12 `transparent_http_head`, README lab section. Shared test helpers (ClientHello builders, TLS client config).
+### Fixed
+- PF-7-01: transparent HTTP skipped the destination policy for the original IP.
+
 ## [phase-6-complete] - 2026-10-31 - Phase 6: HTTP/2 inside intercepted TLS (pentest in the final run, A-29)
 ### Added
 - ALPN mirroring (D-40): h2 only when both client and origin chose it; never h1<->h2 translation, never h2c.

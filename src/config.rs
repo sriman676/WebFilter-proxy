@@ -779,11 +779,29 @@ impl Config {
                 "an argon2id hash is required when admin.enabled (D-55)",
             ));
         }
-        if self.transparent.enabled && !self.transparent.acknowledge_lab_only {
-            return Err(invalid(
-                "transparent.acknowledge_lab_only",
-                "must be true when transparent.enabled (D-41)",
-            ));
+        if self.transparent.enabled {
+            let t = &self.transparent;
+            if !t.acknowledge_lab_only {
+                return Err(invalid(
+                    "transparent.acknowledge_lab_only",
+                    "must be true when transparent.enabled (D-41)",
+                ));
+            }
+            if !cfg!(target_os = "linux") {
+                return Err(invalid(
+                    "transparent.enabled",
+                    "transparent mode is Linux only (D-41)",
+                ));
+            }
+            let fixed = |a: &SocketAddr| a.port() != 0;
+            if [t.http_listen, t.tls_listen].iter().any(|a| fixed(a) && *a == self.listen)
+                || (fixed(&t.http_listen) && t.http_listen == t.tls_listen)
+            {
+                return Err(invalid(
+                    "transparent.http_listen",
+                    "transparent listeners must differ from each other and from listen",
+                ));
+            }
         }
         self.validate_ranges()?;
         for (key, path) in [

@@ -91,6 +91,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "transparent_http_head"
+path = "fuzz_targets/transparent_http_head.rs"
+test = false
+doc = false
+bench = false
+
 # Separate workspace so the main package never builds fuzz code.
 [workspace]
 members = ["."]

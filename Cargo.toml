@@ -89,6 +89,10 @@ uuid = { version = "1.29.0", features = ["v7"] }
 webpki-roots = "1.0.11"
 zeroize = "1.9.1"
 
+# SO_ORIGINAL_DST for transparent mode (D-27, D-41); Linux only.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["socket", "net"] }
+
 [dev-dependencies]
 hyper = { version = "1.12.0", features = ["server", "http1"] }
 proptest = "1.12.0"

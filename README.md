@@ -33,6 +33,22 @@ cargo run --bin webfilter-client -- https://example.com https://rust-lang.org
 Upstream certificates are always verified (D-20); an invalid origin certificate gives `502 upstream_cert_invalid`.
 For manual experiments, `scripts/gen_test_pki.sh <dir> <host...>` creates a throwaway test PKI.
 
+## Transparent mode (optional, Linux lab only)
+> Transparent mode intercepts traffic from devices that never configured a proxy. Use it only in the
+> network-namespace lab on your own machine (D-41, D-43); it is off by default and refuses to start unless
+> `[transparent] acknowledge_lab_only = true`.
+
+1. Review `scripts/netns_lab.sh` first: it creates only netns `wf-client`, veth `wf-veth0/1`, dummy `wf-origin`
+   (192.0.2.10-11) and the nft table `inet wf_lab`, and `down` removes exactly those.
+2. `sudo -E just e2e-netns` builds the lab, runs E-44..E-50 with the proxy as your user, and checks that the host's
+   ruleset, namespaces and links are identical afterwards.
+3. Manual use: `sudo scripts/netns_lab.sh up`, run the proxy with `http_listen = "10.200.0.1:18880"` and
+   `tls_listen = "10.200.0.1:18443"`, then `sudo ip netns exec wf-client curl http://...`; finish with
+   `sudo scripts/netns_lab.sh down`.
+
+Limitations (by design): only redirected tcp/80 and tcp/443 are seen; QUIC is rejected by the lab rule, other ports,
+DoH and pinned apps bypass; ECH hides the name (blocked by default); transparent clients cannot do proxy auth.
+
 ## Documentation map
 Start at `docs/INDEX.md` (it lists every document, its purpose and the reading order; docs load progressively, D-47). Gap history: `archive/GAPS_ANALYSIS.md`.
 

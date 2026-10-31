@@ -15,7 +15,7 @@ use super::ProxyDeps;
 use super::http1::{BodyFraming, RequestHead, ResponseHead, forward_headers, write_head};
 use super::io::fill;
 use super::pipeline::{
-    Fail, Outcome, Tunnel, Upstream, UpstreamBox, client_gone, connect_upstream, fail,
+    Fail, Outcome, Tunnel, Upstream, UpstreamBox, Via, client_gone, connect_upstream, fail,
     note_decision, note_target, resolve, resolved_rule, send_block, serve_connection, upstream_tls,
     write_all,
 };
@@ -24,7 +24,7 @@ use crate::logger::RequestEvent;
 use crate::normalize::{NormalizedTarget, TargetContext, canonicalize};
 use crate::policy::{PortKind, check_port};
 use crate::reason::Reason;
-use crate::tls::{Peek, Prefixed, is_passthrough, peek_client_hello};
+use crate::tls::{ClientHelloInfo, Peek, Prefixed, is_passthrough, peek_client_hello};
 
 /// Relay buffer size.
 pub const RELAY_BUF: usize = 16 * 1024;
@@ -130,7 +130,7 @@ where
 
 /// Send `answer` to the client, forward bytes the client already sent after its head (they
 /// belong to the tunnel), then relay both ways until close or idle.
-async fn open_tunnel<S, U>(
+pub(crate) async fn open_tunnel<S, U>(
     client: &mut S,
     buf: &mut Vec<u8>,
     upstream: &mut U,
@@ -154,9 +154,37 @@ where
     Ok(Outcome::Done)
 }
 
+/// Read the ClientHello at the start of a tunnel. `Ok(None)` means the bytes are not TLS.
+pub(crate) async fn read_hello<S>(
+    client: &mut S,
+    buf: &mut Vec<u8>,
+    deadline: Instant,
+) -> Result<Option<ClientHelloInfo>, Fail>
+where
+    S: AsyncRead + Unpin,
+{
+    loop {
+        match peek_client_hello(buf) {
+            Peek::Incomplete => {
+                if !matches!(fill(client, buf, deadline).await, Ok(n) if n > 0) {
+                    return Err(Fail {
+                        status: None,
+                        reason: Reason::Timeout,
+                        error: "no ClientHello",
+                    });
+                }
+            }
+            Peek::Hello(h) => return Ok(Some(h)),
+            Peek::Malformed(e) => {
+                return Err(Fail { status: None, reason: Reason::InvalidRequest, error: e });
+            }
+            Peek::NotTls => return Ok(None),
+        }
+    }
+}
+
 /// Interception (SPEC 4.9): answer 200, peek the ClientHello (TLS vs non-TLS, SNI, ECH), check
-/// SNI against the CONNECT host (D-21, D-22), terminate TLS with a minted leaf, and serve the
-/// inner requests through the full pipeline.
+/// SNI against the CONNECT host (D-21, D-22), then [`intercept`].
 async fn intercept_tunnel<S>(
     client: &mut S,
     buf: &mut Vec<u8>,
@@ -174,46 +202,27 @@ where
         .await
         .map_err(|_| client_gone())?;
     ev.status = 200;
-    let deadline = Instant::now() + handshake;
-    let hello = loop {
-        match peek_client_hello(buf) {
-            Peek::Incomplete => {
-                if !matches!(fill(client, buf, deadline).await, Ok(n) if n > 0) {
-                    return Err(Fail {
-                        status: None,
-                        reason: Reason::Timeout,
-                        error: "no ClientHello",
-                    });
-                }
-            }
-            Peek::Hello(h) => break h,
-            Peek::Malformed(e) => {
-                return Err(Fail { status: None, reason: Reason::InvalidRequest, error: e });
-            }
-            Peek::NotTls if deps.cfg.block_non_tls_connect => {
-                ev.action = Action::Block.as_str();
-                return Err(Fail {
-                    status: None,
-                    reason: Reason::NonTlsOnConnect,
-                    error: "non-TLS traffic on CONNECT",
-                });
-            }
-            Peek::NotTls => {
-                // Not TLS and allowed: tunnel opaquely (SPEC 4.9).
-                let (mut upstream, ip) = connect_upstream(&ips, t.port, deps).await?;
-                ev.dest_ip = Some(ip.to_string());
-                return open_tunnel(client, buf, &mut upstream, b"", ev, deps).await;
-            }
+    let Some(hello) = read_hello(client, buf, Instant::now() + handshake).await? else {
+        if deps.cfg.block_non_tls_connect {
+            ev.action = Action::Block.as_str();
+            return Err(Fail {
+                status: None,
+                reason: Reason::NonTlsOnConnect,
+                error: "non-TLS traffic on CONNECT",
+            });
         }
+        // Not TLS and allowed: tunnel opaquely (SPEC 4.9).
+        let (mut upstream, ip) = connect_upstream(&ips, t.port, deps).await?;
+        ev.dest_ip = Some(ip.to_string());
+        return open_tunnel(client, buf, &mut upstream, b"", ev, deps).await;
     };
-    ev.tls_sni.clone_from(&hello.sni);
-    ev.ech_present = hello.ech_present;
     let connect_host = t.host.to_string();
     let connect_host = connect_host.trim_start_matches('[').trim_end_matches(']');
     if !hello.ech_present
         && let Some(sni) = &hello.sni
         && sni.trim_end_matches('.') != connect_host
     {
+        ev.tls_sni.clone_from(&hello.sni);
         ev.action = Action::Block.as_str();
         return Err(Fail {
             status: None,
@@ -221,6 +230,37 @@ where
             error: "SNI differs from the CONNECT host",
         });
     }
+    let tunnel = Tunnel {
+        host: t.host,
+        port: t.port,
+        ips,
+        sni: None,
+        ech: false,
+        user: ev.proxy_user.clone(),
+        orig_dst: None,
+        host_verified: None,
+    };
+    intercept(client, buf, hello, tunnel, ev, deps, SocketAddr::new(peer, ev.src_port)).await
+}
+
+/// Terminate TLS with a minted leaf after ALPN mirroring (D-40) and serve the inner requests
+/// through the full pipeline (HTTP/1) or the h2 core. The tunnel's event is logged when it ends;
+/// every inner request gets its own event.
+pub(crate) async fn intercept<S>(
+    client: &mut S,
+    buf: &mut Vec<u8>,
+    hello: ClientHelloInfo,
+    mut tunnel: Tunnel,
+    ev: &mut RequestEvent,
+    deps: &Arc<ProxyDeps>,
+    peer: SocketAddr,
+) -> Result<Outcome, Fail>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    ev.tls_sni.clone_from(&hello.sni);
+    ev.ech_present = hello.ech_present;
+    let handshake = Duration::from_secs(deps.cfg.timeouts.tls_handshake);
     let leaves = deps.leaves.as_ref().ok_or(Fail {
         status: None,
         reason: Reason::InternalError,
@@ -234,10 +274,10 @@ where
             .filter(|p| hello.alpn.iter().any(|c| c == p))
             .map(<[u8]>::to_vec)
             .collect();
-        let no_page = |f: Fail| Fail { status: None, ..f }; // the 200 was already sent
-        let (tcp, ip) = connect_upstream(&ips, t.port, deps).await.map_err(no_page)?;
+        let no_page = |f: Fail| Fail { status: None, ..f }; // nothing can be answered in clear
+        let (tcp, ip) = connect_upstream(&tunnel.ips, tunnel.port, deps).await.map_err(no_page)?;
         ev.dest_ip = Some(ip.to_string());
-        let up = upstream_tls(tcp, &t.host, deps, Some(offer)).await.map_err(no_page)?;
+        let up = upstream_tls(tcp, &tunnel.host, deps, Some(offer)).await.map_err(no_page)?;
         match up.get_ref().1.alpn_protocol().map(<[u8]>::to_vec) {
             Some(p) if p == b"h2" => (vec![p], Some((up, ip))),
             selected => (selected.into_iter().collect(), None), // probe dropped; h1 per request
@@ -245,7 +285,7 @@ where
     } else {
         (hello.alpn.iter().filter(|p| p.as_slice() == b"http/1.1").cloned().collect(), None)
     };
-    let config = leaves.server_config_for(&t.host, alpn).map_err(|_| Fail {
+    let config = leaves.server_config_for(&tunnel.host, alpn).map_err(|_| Fail {
         status: None,
         reason: Reason::InternalError,
         error: "leaf minting failed",
@@ -266,16 +306,9 @@ where
     ev.tls_intercepted = true;
     let negotiated = tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
     ev.alpn = Some(if negotiated.as_deref() == Some(b"h2") { "h2" } else { "http/1.1" }.into());
-    let tunnel = Arc::new(Tunnel {
-        host: t.host.clone(),
-        port: t.port,
-        ips,
-        sni: hello.sni,
-        ech: hello.ech_present,
-        user: ev.proxy_user.clone(),
-    });
-    // The CONNECT event is logged when the tunnel ends; every inner request gets its own event.
-    let peer = SocketAddr::new(peer, ev.src_port);
+    tunnel.sni = hello.sni;
+    tunnel.ech = hello.ech_present;
+    let tunnel = Arc::new(tunnel);
     match h2_upstream {
         Some((up, ip)) if negotiated.as_deref() == Some(b"h2") => {
             super::h2::serve(tls, up, ip, peer, Arc::clone(deps), tunnel).await;
@@ -295,7 +328,7 @@ fn serve_tunnel<'a>(
     deps: Arc<ProxyDeps>,
     tunnel: Arc<Tunnel>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-    Box::pin(serve_connection(tls, peer, deps, Some(tunnel)))
+    Box::pin(serve_connection(tls, peer, deps, Via::Tunnel(tunnel)))
 }
 
 /// After a `101 Switching Protocols` for a validated websocket handshake (D-23): forward the

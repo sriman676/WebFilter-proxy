@@ -15,8 +15,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config, status};
-use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
+use common::{
+    Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config, sni_ext, status,
+    synthetic_hello,
+};
+use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use webfilter::normalize::Host;
 use webfilter::tls::{CaStore, LeafCache, Peek, is_passthrough, peek_client_hello};
@@ -133,36 +136,6 @@ fn real_client_hello(sni: &str, alpn: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// A hand-built ClientHello with the given extensions.
-fn synthetic_hello(extensions: &[(u16, Vec<u8>)]) -> Vec<u8> {
-    let mut ext = Vec::new();
-    for (kind, body) in extensions {
-        ext.extend_from_slice(&kind.to_be_bytes());
-        ext.extend_from_slice(&(body.len() as u16).to_be_bytes());
-        ext.extend_from_slice(body);
-    }
-    let mut hello = vec![0x03, 0x03];
-    hello.extend_from_slice(&[7u8; 32]);
-    hello.extend_from_slice(&[0, 0, 2, 0x13, 0x01, 1, 0]);
-    hello.extend_from_slice(&(ext.len() as u16).to_be_bytes());
-    hello.extend_from_slice(&ext);
-    let mut msg = vec![1, 0, (hello.len() >> 8) as u8, hello.len() as u8];
-    msg.splice(1..2, [(hello.len() >> 16) as u8]);
-    msg.extend_from_slice(&hello);
-    let mut rec = vec![0x16, 0x03, 0x01, (msg.len() >> 8) as u8, msg.len() as u8];
-    rec.extend_from_slice(&msg);
-    rec
-}
-
-fn sni_ext(name: &str) -> (u16, Vec<u8>) {
-    let mut entry = vec![0u8];
-    entry.extend_from_slice(&(name.len() as u16).to_be_bytes());
-    entry.extend_from_slice(name.as_bytes());
-    let mut body = (entry.len() as u16).to_be_bytes().to_vec();
-    body.extend_from_slice(&entry);
-    (0x0000, body)
-}
-
 #[test]
 fn peek_real_and_synthetic_hellos() {
     let hello = real_client_hello("Good.Test", &[b"h2", b"http/1.1"]);
@@ -241,16 +214,7 @@ async fn tunnel(
         }
         head.push(b[0]);
     }
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(CertificateDer::from_pem_slice(ca_pem.as_bytes()).unwrap()).unwrap();
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    tokio_rustls::TlsConnector::from(Arc::new(config))
+    tokio_rustls::TlsConnector::from(common::client_config(ca_pem, &[]))
         .connect(ServerName::try_from(sni.to_owned()).unwrap(), s)
         .await
 }
