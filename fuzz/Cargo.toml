@@ -98,6 +98,20 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "profiles_config"
+path = "fuzz_targets/profiles_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "limiter"
+path = "fuzz_targets/limiter.rs"
+test = false
+doc = false
+bench = false
+
 # Separate workspace so the main package never builds fuzz code.
 [workspace]
 members = ["."]

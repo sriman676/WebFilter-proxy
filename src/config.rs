@@ -113,12 +113,12 @@ pub struct Config {
     pub transparent: TransparentConfig,
     /// Admin listener (D-55).
     pub admin: AdminConfig,
-    /// v1.1 placeholder, typed in Phase 9 (DECISIONS_ADDENDUM A-04).
-    pub profiles: Option<RawSection>,
-    /// v1.1 placeholder, typed in Phase 9.
-    pub clients: Option<RawSection>,
-    /// v1.1 placeholder, typed in Phase 9.
-    pub users: Option<RawSection>,
+    /// Profiles (SPEC_EXT_POLICY P1); `default` always exists.
+    pub profiles: Vec<ProfileConfig>,
+    /// CIDR -> profile.
+    pub clients: Vec<ClientConfig>,
+    /// Proxy users (D-50); `[proxy_auth]` stays valid as one user in `default`.
+    pub users: Vec<UserConfig>,
     /// v1.1 placeholder, typed in Phase 10.
     pub feeds: Option<RawSection>,
     /// v1.1 placeholder, typed in Phase 10.
@@ -156,9 +156,9 @@ impl Default for Config {
             http2: Http2Config::default(),
             transparent: TransparentConfig::default(),
             admin: AdminConfig::default(),
-            profiles: None,
-            clients: None,
-            users: None,
+            profiles: Vec::new(),
+            clients: Vec::new(),
+            users: Vec::new(),
             feeds: None,
             feeds_global: None,
             scan: None,
@@ -503,6 +503,98 @@ pub struct ProxyAuthConfig {
     pub password_hash: Redacted<String>,
 }
 
+/// `[[users]]` (D-50).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserConfig {
+    /// `[A-Za-z0-9._-]{1,64}`.
+    pub username: String,
+    /// argon2id PHC hash.
+    pub password_hash: Redacted<String>,
+    /// Profile name.
+    #[serde(default = "default_profile")]
+    pub profile: String,
+}
+
+/// `[[clients]]`: source network -> profile (longest prefix wins).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientConfig {
+    /// CIDR, e.g. `192.168.1.0/24`.
+    pub cidr: String,
+    /// Profile name.
+    pub profile: String,
+}
+
+fn default_profile() -> String {
+    "default".to_owned()
+}
+
+/// `[[profiles]]` (SPEC_EXT_POLICY P1). Never weakens safety policy (D-50).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProfileConfig {
+    /// `[a-z0-9_-]{1,32}`.
+    pub name: String,
+    /// Content-rule mode for this profile.
+    pub mode: Option<Mode>,
+    /// Extra allowlist (bypasses list rules only).
+    pub allow_domains: Vec<String>,
+    /// Extra blocked domains (blocklist grammar).
+    pub extra_blocked_domains: Vec<String>,
+    /// Extra URL patterns (blocklist grammar).
+    pub extra_url_patterns: Vec<String>,
+    /// Replaces `rules.blocked_extensions`.
+    pub blocked_extensions: Option<Vec<String>>,
+    /// Replaces `rules.blocked_content_types`.
+    pub blocked_content_types: Option<Vec<String>>,
+    /// Threat feeds (Phase 10).
+    pub feeds: Vec<String>,
+    /// Download scanning (Phase 10).
+    pub scan_downloads: Option<bool>,
+    /// Access requests (Phase 11).
+    pub access_requests: Option<bool>,
+    /// Limits; absent = unlimited (A-39).
+    pub rate: Option<RateConfig>,
+}
+
+/// `[profiles.rate]` (SPEC_EXT_POLICY P2); missing keys take these defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RateConfig {
+    /// Sustained requests per second.
+    pub requests_per_sec: u32,
+    /// Bucket size.
+    pub burst: u32,
+    /// Concurrent client connections.
+    pub max_concurrent_connections: u32,
+    /// Requests in flight.
+    pub max_inflight_requests: u32,
+    /// Open CONNECT tunnels.
+    pub max_tunnels: u32,
+    /// Download cap (0 = unlimited, else >= 4096).
+    pub down_bytes_per_sec: u64,
+    /// Upload cap (0 = unlimited, else >= 4096).
+    pub up_bytes_per_sec: u64,
+    /// Bytes per UTC day (0 = off).
+    pub daily_quota_bytes: u64,
+}
+
+impl Default for RateConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_sec: 50,
+            burst: 100,
+            max_concurrent_connections: 64,
+            max_inflight_requests: 128,
+            max_tunnels: 32,
+            down_bytes_per_sec: 0,
+            up_bytes_per_sec: 0,
+            daily_quota_bytes: 0,
+        }
+    }
+}
+
 /// `[block_page]` (A-26): an HTML template with `{url}`, `{host}`, `{reason}`, `{rule_id}`,
 /// `{category}`, `{event_id}`, `{timestamp}` placeholders (always HTML-escaped).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -753,12 +845,16 @@ impl Config {
 
     /// Semantic validation (SPEC 6). Paths must already be resolved.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if !self.listen.ip().is_loopback() && self.proxy_auth.is_none() {
+        if !self.listen.ip().is_loopback() && self.proxy_auth.is_none() && self.users.is_empty() {
             return Err(invalid(
                 "listen",
-                format!("{} is not loopback; [proxy_auth] is required (D-13)", self.listen),
+                format!(
+                    "{} is not loopback; [proxy_auth] or [[users]] is required (D-13)",
+                    self.listen
+                ),
             ));
         }
+        self.validate_policies()?;
         if let Some(auth) = &self.proxy_auth {
             if auth.username.is_empty() || auth.username.contains(':') {
                 return Err(invalid("proxy_auth.username", "must be non-empty and contain no ':'"));
@@ -825,6 +921,48 @@ impl Config {
     }
 
     /// Category names unique and well-formed, files readable, schedules parse (A-27).
+    /// Users, clients and profiles (D-50, D-51); the lists compile via `PolicySet::build`.
+    fn validate_policies(&self) -> Result<(), ConfigError> {
+        if self.profiles.len() > 100 || self.users.len() + self.clients.len() > 10_000 {
+            return Err(invalid("profiles", "at most 100 profiles and 10,000 users+clients"));
+        }
+        for u in &self.users {
+            let ok = (1..=64).contains(&u.username.len())
+                && u.username.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+            if !ok {
+                return Err(invalid(
+                    "users.username",
+                    format!("{:?}: use [A-Za-z0-9._-], 1-64 chars", u.username),
+                ));
+            }
+            if !crate::auth::is_argon2id_phc(&u.password_hash.0) {
+                return Err(invalid(
+                    "users.password_hash",
+                    format!("{}: argon2id PHC hash required", u.username),
+                ));
+            }
+        }
+        for p in &self.profiles {
+            if let Some(r) = p.rate {
+                let cap_ok = |v: u64| v == 0 || v >= 4096;
+                if r.requests_per_sec == 0
+                    || r.burst == 0
+                    || r.max_concurrent_connections == 0
+                    || r.max_inflight_requests == 0
+                    || r.max_tunnels == 0
+                    || !cap_ok(r.down_bytes_per_sec)
+                    || !cap_ok(r.up_bytes_per_sec)
+                {
+                    return Err(invalid(
+                        "profiles.rate",
+                        format!("{}: limits must be >= 1; byte caps 0 or >= 4096", p.name),
+                    ));
+                }
+            }
+        }
+        crate::profiles::PolicySet::build(self).map(|_| ()).map_err(|e| invalid("profiles", e))
+    }
+
     fn validate_categories(&self) -> Result<(), ConfigError> {
         const KEY: &str = "blocklists.categories";
         let offset = crate::schedule::parse_offset(&self.blocklists.utc_offset)

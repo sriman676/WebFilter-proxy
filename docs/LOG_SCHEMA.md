@@ -62,7 +62,7 @@ Field names align with the CIM **Web** model (ECS-like names in OpenSearch). All
 `auth_lockout`, `listener_error`, `feed_updated`, `feed_failed`, `feed_rejected`, `feed_stale`, `malware_detected`, `scanner_down`, `access_request_created`, `access_request_decided`, `temp_allow_added`, `temp_allow_expired`, `policy_reloaded`, `h2_flood` (detail: violation type, counters), `orig_dst_failed`, `insecure_permissions` (detail: `files`, world-writable config/list/template paths). Never contains secrets.
 
 ## Stats event
-`{"timestamp","event_type":"stats","window_secs":60,"requests","allowed","blocked","errors","bytes_in","bytes_out","active_connections","dropped_log_events","h2_flood","top_blocked":[{"host","count"}],"lists":{"domains","regexes","ips"}}`
+`{"timestamp","event_type":"stats","window_secs":60,"requests","allowed","blocked","errors","bytes_in","bytes_out","active_connections","dropped_log_events","h2_flood","limits":{"<profile>":{"rate_limited","quota_exceeded","too_many_connections"}},"top_blocked":[{"host","count"}],"lists":{"domains","regexes","ips"}}`
 
 ## Injection & privacy rules
 - Serialization is via serde_json only (no string concatenation) so control characters/quotes/newlines are

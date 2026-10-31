@@ -23,9 +23,11 @@ pub(crate) use super::io::write_all;
 use super::io::{IoError, copy_body, read_head};
 use super::response::{BlockInfo, error_page, page};
 use crate::filter::{Action, Decision, Phase};
+use crate::limiter::{LimitReject, Shaped};
 use crate::logger::RequestEvent;
 use crate::normalize::{Host, NormalizedTarget, Scheme, TargetContext, TargetError, canonicalize};
 use crate::policy::{PolicyVerdict, PortKind, check_destination, check_port};
+use crate::profiles::Profile;
 use crate::reason::Reason;
 
 /// How a request ended (before logging).
@@ -97,6 +99,10 @@ pub struct Tunnel {
     pub orig_dst: Option<SocketAddr>,
     /// Transparent TLS: SNI resolved to the original IP (`None` when not checked).
     pub host_verified: Option<bool>,
+    /// The CONNECT identity, inherited by every inner request (D-50).
+    pub client_id: String,
+    /// The CONNECT profile.
+    pub profile: Arc<Profile>,
 }
 
 /// How a connection reached the pipeline.
@@ -184,6 +190,18 @@ pub(crate) fn block_html(ev: &RequestEvent, d: &Decision, deps: &ProxyDeps) -> S
     })
 }
 
+/// Answer a limit rejection with `Retry-After` (D-51) and log it.
+pub(crate) async fn send_limit<S: AsyncWrite + Unpin>(
+    client: &mut S,
+    ev: &mut RequestEvent,
+    r: &LimitReject,
+    deps: &ProxyDeps,
+) {
+    let extra = [("retry-after", r.retry_after.to_string())];
+    send(client, &error_page(r.status, r.reason, &ev.event_id, &extra), deps).await;
+    note_fail(ev, &fail(r.status, r.reason, "limit exceeded"));
+}
+
 /// Send the block page for a decision (SPEC 4.7).
 pub(crate) async fn send_block<S: AsyncWrite + Unpin>(
     client: &mut S,
@@ -239,10 +257,11 @@ pub(crate) async fn send_fail<S: AsyncWrite + Unpin>(
 }
 
 /// Serve one client connection (or one intercepted tunnel) until it closes or must be closed.
-pub async fn serve_connection<S>(mut client: S, peer: SocketAddr, deps: Arc<ProxyDeps>, via: Via)
+pub async fn serve_connection<S>(client: S, peer: SocketAddr, deps: Arc<ProxyDeps>, via: Via)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    let mut client = Shaped::new(client);
     let mut buf = Vec::new();
     let mut idle_secs = deps.cfg.timeouts.client_head_read;
     while !deps.shutting_down() {
@@ -287,6 +306,7 @@ where
 
         let outcome =
             handle_request(&mut client, &mut buf, &head, &mut ev, &deps, peer.ip(), &via).await;
+        ev.throttled |= client.take_throttled();
         ev.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let keep_alive = match outcome {
             Ok(Outcome::Forwarded { keep_alive }) => keep_alive,
@@ -357,7 +377,7 @@ fn tunnel_target(head: &RequestHead, tn: &Tunnel) -> Result<NormalizedTarget, Fa
 }
 
 async fn handle_request<S>(
-    client: &mut S,
+    client: &mut Shaped<S>,
     buf: &mut Vec<u8>,
     head: &RequestHead,
     ev: &mut RequestEvent,
@@ -374,6 +394,31 @@ where
     if head.method == "CONNECT" && !matches!(via, Via::Explicit) {
         return Err(fail(400, Reason::InvalidRequest, "CONNECT inside a tunnel or transparent"));
     }
+    // 3b. Identity, profile and limits (D-50, D-51), before canonicalization.
+    let user = match via {
+        Via::Explicit => deps.authorize(head, ev, peer).await?,
+        _ => None,
+    };
+    let (id, profile) = match via {
+        Via::Tunnel(tn) => {
+            ev.client_id = Some(tn.client_id.clone());
+            ev.profile = Some(tn.profile.name.clone());
+            (tn.client_id.clone(), Arc::clone(&tn.profile))
+        }
+        _ => deps.identify(peer, user.as_deref(), ev),
+    };
+    let _inflight = match deps.admit(&id, &profile) {
+        Ok(permit) => permit,
+        Err(r) => {
+            send_limit(client, ev, &r, deps).await;
+            return Ok(Outcome::Done);
+        }
+    };
+    if !matches!(via, Via::Tunnel(_)) {
+        // Tunnels are shaped once, on the outer (CONNECT) connection.
+        let shaping = profile.rate.map(|r| deps.limiter.buckets(&id, &r)).unwrap_or_default();
+        client.set(shaping);
+    }
     let t = match via {
         Via::Tunnel(tn) => tunnel_target(head, tn)?,
         Via::Transparent(orig) => {
@@ -389,9 +434,11 @@ where
             t
         }
         Via::Explicit => {
-            deps.authorize(head, ev, peer).await?;
             if head.method == "CONNECT" {
-                return super::connect::handle_connect(client, buf, head, ev, deps, peer).await;
+                return super::connect::handle_connect(
+                    client, buf, head, ev, deps, peer, &id, &profile,
+                )
+                .await;
             }
             let t = plain_target(head);
             if let Ok(t) = &t {
@@ -410,7 +457,7 @@ where
     }
 
     // 8. Pre-DNS rules: a blocked name is never resolved.
-    let d = deps.evaluate(&t, Phase::PreDns);
+    let d = deps.evaluate(&t, Phase::PreDns, &profile);
     note_decision(ev, &d);
     if d.is_block() {
         send_block(client, ev, &d, deps).await;
@@ -426,7 +473,7 @@ where
         }
         Via::Explicit => resolve(&t, ev, deps).await?,
     };
-    if let Some(d) = resolved_rule(deps, &t, &ips) {
+    if let Some(d) = resolved_rule(deps, &t, &ips, &profile) {
         note_decision(ev, &d);
         if d.is_block() {
             send_block(client, ev, &d, deps).await;
@@ -440,7 +487,7 @@ where
         Via::Tunnel(tn) => Box::new(upstream_tls(tcp, &tn.host, deps, None).await?),
         Via::Transparent(_) | Via::Explicit => Box::new(tcp),
     };
-    forward(client, buf, head, ev, deps, &t, framing, websocket, upstream).await
+    forward(client, buf, head, ev, deps, &t, &profile, framing, websocket, upstream).await
 }
 
 /// The first non-allow decision of rule 3 over the validated addresses.
@@ -448,9 +495,10 @@ pub(crate) fn resolved_rule(
     deps: &ProxyDeps,
     t: &NormalizedTarget,
     ips: &[IpAddr],
+    profile: &Profile,
 ) -> Option<Decision> {
     ips.iter()
-        .map(|ip| deps.evaluate(t, Phase::Resolved { ip: *ip }))
+        .map(|ip| deps.evaluate(t, Phase::Resolved { ip: *ip }, profile))
         .find(|d| d.reason != Reason::None)
 }
 
@@ -510,6 +558,7 @@ async fn forward<S>(
     ev: &mut RequestEvent,
     deps: &Arc<ProxyDeps>,
     t: &NormalizedTarget,
+    profile: &Profile,
     framing: BodyFraming,
     websocket: bool,
     mut upstream: UpstreamBox,
@@ -579,7 +628,8 @@ where
         single(&resp.headers, "content-type").map(|v| String::from_utf8_lossy(v).into_owned());
     ev.http_content_type =
         content_type.as_deref().map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
-    let d = deps.evaluate(t, Phase::ResponseHeaders { content_type: content_type.as_deref() });
+    let d =
+        deps.evaluate(t, Phase::ResponseHeaders { content_type: content_type.as_deref() }, profile);
     if d.reason != Reason::None {
         note_decision(ev, &d);
     }

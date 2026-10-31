@@ -183,6 +183,9 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
                     if let ReloadOutcome::Failed(e) = handle.deps.lists.reload() {
                         eprintln!("blocklist reload failed (previous lists kept): {e}");
                     }
+                    if let Err(e) = handle.deps.reload_policies() {
+                        eprintln!("policy reload failed (previous users/profiles kept): {e}");
+                    }
                 }
                 _ = usr1.recv() => handle.deps.logger.reopen(),
             }

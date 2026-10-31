@@ -27,13 +27,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
 
-use crate::auth::{Lockout, verify_credentials};
+use crate::auth::{Lockout, verify_password};
 use crate::blocklist::BlocklistHandle;
 use crate::config::{Config, Mode};
-use crate::filter::{Action, Decision, Phase, evaluate};
+use crate::filter::{Action, Decision, Phase, evaluate_profile};
+use crate::limiter::{LimitReject, Limiter, Permit, SystemClock};
 use crate::logger::{EventLogger, ListCounts, RequestEvent, Stats, SysEvent, SystemLog};
 use crate::normalize::{NormalizedTarget, fold_ip};
 use crate::policy::{DestPolicy, Resolver, SystemResolver};
+use crate::profiles::{PolicySet, Profile};
 use crate::reason::Reason;
 use http1::{Limits, RequestHead, single};
 use pipeline::{Fail, fail};
@@ -48,30 +50,42 @@ pub const AUTH_CACHE_MAX: usize = 1024;
 /// Concurrent argon2 verifications (each costs ~19 MiB and tens of ms).
 pub const AUTH_PARALLELISM: usize = 4;
 
-/// Proxy authentication state (D-14, SPEC 4.10).
+/// Hash of a random, discarded password with the same parameters as `hash-password`: unknown
+/// user names are verified against it so they cost the same as a wrong password (PT-9.7).
+const DUMMY_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$/LgZaRwAUqKQTcyrNq4vMQ$9fQXbi3WR1jHWdNQmy96Td4xVgBOz8gFK4i0RSuG/z0";
+
+/// Proxy authentication (D-14, D-50, SPEC 4.10): users come from the current [`PolicySet`].
 struct ProxyAuth {
-    user: String,
-    phc: String,
-    lockout: Lockout,
+    ip_lockout: Lockout<IpAddr>,
+    user_lockout: Lockout<String>,
     cache: Mutex<HashMap<[u8; 32], Instant>>,
     permits: Semaphore,
+    /// Verified for unknown users so they cost the same as a wrong password (PT-9.7).
+    dummy_phc: String,
 }
 
 impl ProxyAuth {
-    fn new(user: &str, phc: &str) -> Self {
+    fn new() -> Self {
         Self {
-            user: user.to_owned(),
-            phc: phc.to_owned(),
-            lockout: Lockout::default(),
+            ip_lockout: Lockout::default(),
+            user_lockout: Lockout::default(),
             cache: Mutex::new(HashMap::new()),
             permits: Semaphore::new(AUTH_PARALLELISM),
+            dummy_phc: DUMMY_PHC.to_owned(),
         }
     }
 
-    /// Check `Proxy-Authorization: Basic ...`; returns the user name.
-    async fn check(&self, head: &RequestHead, ip: IpAddr, sys: &SystemLog) -> Result<String, Fail> {
-        if self.lockout.is_locked(ip, std::time::Instant::now()) {
-            return Err(fail(429, Reason::RateLimited, "too many authentication failures"));
+    /// Check `Proxy-Authorization: Basic ...` against `users`; returns the user name.
+    async fn check(
+        &self,
+        head: &RequestHead,
+        ip: IpAddr,
+        users: &PolicySet,
+        sys: &SystemLog,
+    ) -> Result<String, Fail> {
+        let locked = || fail(429, Reason::RateLimited, "too many authentication failures");
+        if self.ip_lockout.is_locked(ip, std::time::Instant::now()) {
+            return Err(locked());
         }
         let Some(value) = single(&head.headers, "proxy-authorization") else {
             return Err(fail(407, Reason::AuthRequired, "proxy authentication required"));
@@ -84,8 +98,13 @@ impl ProxyAuth {
             self.failure(ip, "", sys);
             return Err(fail(407, Reason::AuthFailed, "malformed proxy credentials"));
         };
-        let key: [u8; 32] = Sha256::digest(format!("{user}:{password}").as_bytes()).into();
-        let cached = {
+        if self.user_lockout.is_locked(user.to_owned(), std::time::Instant::now()) {
+            return Err(locked());
+        }
+        let known = users.user(user);
+        let phc = known.map_or(self.dummy_phc.as_str(), |u| u.phc.as_str());
+        let key: [u8; 32] = Sha256::digest(format!("{user}\0{password}\0{phc}").as_bytes()).into();
+        let cached = known.is_some() && {
             let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.iter().any(|(k, at)| bool::from(k.ct_eq(&key)) && at.elapsed() < AUTH_CACHE_TTL)
         };
@@ -95,13 +114,11 @@ impl ProxyAuth {
                 .acquire()
                 .await
                 .map_err(|_| fail(500, Reason::InternalError, "auth unavailable"))?;
-            let (expected, phc, u, p) =
-                (self.user.clone(), self.phc.clone(), user.to_owned(), password.to_owned());
-            tokio::task::spawn_blocking(move || {
-                verify_credentials(&expected, &phc, &u, p.as_bytes())
-            })
-            .await
-            .unwrap_or(false)
+            let (phc, p) = (phc.to_owned(), password.to_owned());
+            let valid = tokio::task::spawn_blocking(move || verify_password(&phc, p.as_bytes()))
+                .await
+                .unwrap_or(false);
+            valid && known.is_some()
         };
         if !ok {
             self.failure(ip, user, sys);
@@ -114,15 +131,19 @@ impl ProxyAuth {
             }
             cache.insert(key, Instant::now());
         }
-        self.lockout.record_success(ip);
+        self.ip_lockout.record_success(ip);
+        self.user_lockout.record_success(user.to_owned());
         Ok(user.to_owned())
     }
 
     fn failure(&self, ip: IpAddr, user: &str, sys: &SystemLog) {
-        if self.lockout.record_failure(ip, std::time::Instant::now()) {
+        let now = std::time::Instant::now();
+        let by_ip = self.ip_lockout.record_failure(ip, now);
+        let by_user = !user.is_empty() && self.user_lockout.record_failure(user.to_owned(), now);
+        if by_ip || by_user {
             sys.event(
                 SysEvent::AuthLockout,
-                serde_json::json!({ "ip": ip.to_string(), "user": user }),
+                serde_json::json!({ "ip": ip.to_string(), "user": user, "by": if by_ip { "ip" } else { "user" } }),
             );
         }
     }
@@ -171,7 +192,11 @@ pub struct ProxyDeps {
     pub upstream_tls: Arc<rustls::ClientConfig>,
     /// Original destination of transparent connections (D-41).
     pub orig_dst: Arc<dyn transparent::OriginalDst>,
-    auth: Option<ProxyAuth>,
+    /// Users, clients and profiles (hot-reloaded, D-50).
+    pub policies: arc_swap::ArcSwap<PolicySet>,
+    /// Per-client limits (D-51).
+    pub limiter: Arc<Limiter>,
+    auth: ProxyAuth,
     per_ip: Mutex<HashMap<IpAddr, usize>>,
     shutdown: watch::Receiver<bool>,
 }
@@ -191,6 +216,11 @@ impl ProxyDeps {
     }
 
     fn finish(&self, ev: RequestEvent) {
+        if let (Some(id), Some(name)) = (&ev.client_id, &ev.profile)
+            && let Some(rate) = self.policies.load().profile(name).and_then(|p| p.rate)
+        {
+            self.limiter.add_bytes(id, &rate, ev.bytes_in.saturating_add(ev.bytes_out));
+        }
         let action =
             if ev.action == Action::Block.as_str() { Action::Block } else { Action::Allow };
         self.stats.record(action, &ev.dest_host, ev.bytes_in, ev.bytes_out);
@@ -200,19 +230,61 @@ impl ProxyDeps {
         self.logger.log(ev);
     }
 
-    fn evaluate(&self, t: &NormalizedTarget, phase: Phase<'_>) -> Decision {
-        evaluate(t, phase, &self.lists.snapshot(), &self.cfg.rules, self.cfg.mode)
+    fn evaluate(&self, t: &NormalizedTarget, phase: Phase<'_>, profile: &Profile) -> Decision {
+        let now = time::OffsetDateTime::now_utc();
+        evaluate_profile(t, phase, &self.lists.snapshot(), profile, now)
     }
 
+    /// Authenticate when users exist (per request, D-50); returns the user name.
     async fn authorize(
         &self,
         head: &RequestHead,
         ev: &mut RequestEvent,
         peer: IpAddr,
-    ) -> Result<(), Fail> {
-        let Some(auth) = &self.auth else { return Ok(()) };
-        ev.proxy_user = Some(auth.check(head, peer, &self.logger.system()).await?);
-        Ok(())
+    ) -> Result<Option<String>, Fail> {
+        let users = self.policies.load();
+        if !users.has_users() {
+            return Ok(None);
+        }
+        let user = self.auth.check(head, peer, &users, &self.logger.system()).await?;
+        ev.proxy_user = Some(user.clone());
+        Ok(Some(user))
+    }
+
+    /// Identity and profile for this request; logged on `ev` (D-50).
+    fn identify(
+        &self,
+        peer: IpAddr,
+        user: Option<&str>,
+        ev: &mut RequestEvent,
+    ) -> (String, Arc<Profile>) {
+        let (id, profile) = self.policies.load().resolve(peer, user);
+        ev.client_id = Some(id.clone());
+        ev.profile = Some(profile.name.clone());
+        (id, profile)
+    }
+
+    /// The request-rate/in-flight/quota check (step 3b); limits apply in every mode (D-51).
+    fn admit(&self, id: &str, profile: &Profile) -> Result<Option<Permit>, LimitReject> {
+        let Some(rate) = &profile.rate else { return Ok(None) };
+        self.limiter.check_request(id, rate).map(Some).inspect_err(|r| {
+            self.stats.record_limit(&profile.name, r.reason);
+        })
+    }
+
+    /// Re-read users, clients and profiles from the config file; the old set stays on error.
+    pub fn reload_policies(&self) -> Result<(), String> {
+        let path = self.cfg.source.as_ref().ok_or("no config file")?;
+        let result = Config::load(path)
+            .map_err(|e| e.to_string())
+            .and_then(|c| PolicySet::build(&c))
+            .map(|p| self.policies.store(Arc::new(p)));
+        let detail = match &result {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+        };
+        self.logger.system().event(SysEvent::PolicyReloaded, detail);
+        result
     }
 
     fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnGuard> {
@@ -310,7 +382,7 @@ pub async fn start_with(
     own.extend(transparent_addrs.iter().flat_map(|(h, t)| [*h, *t]));
     let resolver = resolver.or_else(crate::policy::test_hosts_resolver);
     let (tx, rx) = watch::channel(false);
-    let auth = cfg.proxy_auth.as_ref().map(|a| ProxyAuth::new(&a.username, &a.password_hash.0));
+    let policies = PolicySet::build(&cfg).map_err(invalid)?;
     let mode = if cfg.mode == Mode::Monitor { "monitor" } else { "enforce" };
     let deps = Arc::new(ProxyDeps {
         policy: DestPolicy::new(cfg.destination.deny_private_ranges, own),
@@ -325,7 +397,9 @@ pub async fn start_with(
         block_page,
         leaves,
         upstream_tls,
-        auth,
+        policies: arc_swap::ArcSwap::from_pointee(policies),
+        limiter: Limiter::new(Arc::new(SystemClock), crate::limiter::MAX_KEYS),
+        auth: ProxyAuth::new(),
         per_ip: Mutex::new(HashMap::new()),
         shutdown: rx,
     });
@@ -344,6 +418,7 @@ pub async fn start_with(
     let watcher =
         lists.spawn_watcher(Duration::from_secs(deps.cfg.blocklists.reload_interval_secs), sys);
     let stats_task = tokio::spawn(stats_loop(Arc::clone(&deps)));
+    let policy_task = tokio::spawn(policy_watch(Arc::clone(&deps)));
     let mut accept =
         vec![tokio::spawn(accept_loop(listener, Arc::clone(&deps), Listener::Explicit))];
     if let Some((http, tls)) = transparent {
@@ -356,7 +431,7 @@ pub async fn start_with(
         transparent_addrs,
         shutdown: tx,
         accept,
-        background: vec![watcher, stats_task],
+        background: vec![watcher, stats_task, policy_task],
     })
 }
 
@@ -383,6 +458,23 @@ fn load_ca(cfg: &Config, sys: &SystemLog) -> std::io::Result<crate::tls::LeafCac
         Err(e) => {
             sys.event(SysEvent::CaPermissionError, serde_json::json!({ "error": e.to_string() }));
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))
+        }
+    }
+}
+
+/// Reload users/clients/profiles when the config file changes (SPEC_EXT_POLICY P1).
+async fn policy_watch(deps: Arc<ProxyDeps>) {
+    let Some(path) = deps.cfg.source.clone() else { return };
+    let stamp = || std::fs::metadata(&path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+    let mut last = stamp();
+    let mut tick =
+        tokio::time::interval(Duration::from_secs(deps.cfg.blocklists.reload_interval_secs));
+    loop {
+        tick.tick().await;
+        let now = stamp();
+        if now != last {
+            last = now;
+            let _ = deps.reload_policies();
         }
     }
 }
@@ -428,8 +520,20 @@ async fn accept_loop(listener: TcpListener, deps: Arc<ProxyDeps>, kind: Listener
         let deps = Arc::clone(&deps);
         tokio::spawn(async move {
             let Some(guard) = deps.try_acquire(peer.ip()) else {
-                reject_over_limit(stream, peer, &deps).await;
+                reject_over_limit(stream, peer, &deps, 5).await;
                 return;
+            };
+            // Per-client connection cap by source identity (D-51; users are known per request).
+            let profile = Arc::clone(deps.policies.load().profile_for_ip(peer.ip()));
+            let id = crate::profiles::client_id(peer.ip(), None);
+            let _slot = match profile.rate.as_ref().map(|r| deps.limiter.acquire_connection(&id, r))
+            {
+                Some(Err(r)) => {
+                    deps.stats.record_limit(&profile.name, r.reason);
+                    reject_over_limit(stream, peer, &deps, r.retry_after).await;
+                    return;
+                }
+                slot => slot,
             };
             // Panic isolation: a panic in one connection never affects others (SPEC 9).
             let served = match kind {
@@ -462,10 +566,14 @@ async fn accept_loop(listener: TcpListener, deps: Arc<ProxyDeps>, kind: Listener
     }
 }
 
-async fn reject_over_limit(mut stream: TcpStream, peer: SocketAddr, deps: &ProxyDeps) {
+async fn reject_over_limit(mut stream: TcpStream, peer: SocketAddr, deps: &ProxyDeps, retry: u64) {
     let mut ev = deps.new_event(peer);
-    let bytes =
-        error_page(503, Reason::TooManyConnections, &ev.event_id, &[("retry-after", "5".into())]);
+    let bytes = error_page(
+        503,
+        Reason::TooManyConnections,
+        &ev.event_id,
+        &[("retry-after", retry.to_string())],
+    );
     let _ = tokio::time::timeout(Duration::from_secs(2), stream.write_all(&bytes)).await;
     ev.status = 503;
     ev.reason = Reason::TooManyConnections.as_str();
