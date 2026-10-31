@@ -139,6 +139,14 @@ pub enum TargetContext<'a> {
         /// CONNECT port.
         port: u16,
     },
+    /// Origin-form on the transparent HTTP listener: host from `Host`, port = the original
+    /// destination port (SPEC 4.17); absolute-form is rejected.
+    TransparentHost {
+        /// Normalized `Host` name or IP.
+        host: &'a str,
+        /// Original destination port.
+        port: u16,
+    },
 }
 
 /// Why a target was rejected.
@@ -211,6 +219,13 @@ pub fn canonicalize(raw: &str, ctx: TargetContext<'_>) -> Result<NormalizedTarge
                 return Err(TargetError::HostMismatch);
             }
             Ok(t)
+        }
+        TargetContext::TransparentHost { host, port } => {
+            if !raw.starts_with('/') {
+                return Err(Invalid("transparent requests must be origin-form"));
+            }
+            let host = if host.contains(':') { format!("[{host}]") } else { host.to_owned() };
+            parse_absolute(&format!("http://{host}:{port}{raw}"), false)
         }
     }
 }

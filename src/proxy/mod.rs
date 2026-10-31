@@ -9,6 +9,7 @@ pub mod http1;
 pub mod io;
 pub mod pipeline;
 pub mod response;
+pub mod transparent;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -168,6 +169,8 @@ pub struct ProxyDeps {
     pub leaves: Option<Arc<crate::tls::LeafCache>>,
     /// Upstream TLS: verification always on (D-20).
     pub upstream_tls: Arc<rustls::ClientConfig>,
+    /// Original destination of transparent connections (D-41).
+    pub orig_dst: Arc<dyn transparent::OriginalDst>,
     auth: Option<ProxyAuth>,
     per_ip: Mutex<HashMap<IpAddr, usize>>,
     shutdown: watch::Receiver<bool>,
@@ -234,8 +237,10 @@ pub struct ProxyHandle {
     pub local_addr: SocketAddr,
     /// Shared state (tests inspect logs/stats and trigger reloads through it).
     pub deps: Arc<ProxyDeps>,
+    /// Transparent HTTP and TLS listener addresses when enabled (SPEC 4.17).
+    pub transparent_addrs: Option<(SocketAddr, SocketAddr)>,
     shutdown: watch::Sender<bool>,
-    accept: tokio::task::JoinHandle<()>,
+    accept: Vec<tokio::task::JoinHandle<()>>,
     background: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -243,7 +248,9 @@ impl ProxyHandle {
     /// Stop accepting, drain in-flight connections up to `shutdown_drain`, flush logs (D-31).
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
-        self.accept.abort();
+        for a in &self.accept {
+            a.abort();
+        }
         let deadline = Instant::now() + Duration::from_secs(self.deps.cfg.timeouts.shutdown_drain);
         while self.deps.stats.active_connections.load(Ordering::Relaxed) > 0
             && Instant::now() < deadline
@@ -264,6 +271,15 @@ pub async fn start(
     cfg: Config,
     resolver: Option<Arc<dyn Resolver>>,
 ) -> std::io::Result<ProxyHandle> {
+    start_with(cfg, resolver, None).await
+}
+
+/// [`start`] with an injected original-destination source for transparent tests (D-43).
+pub async fn start_with(
+    cfg: Config,
+    resolver: Option<Arc<dyn Resolver>>,
+    orig_dst: Option<Arc<dyn transparent::OriginalDst>>,
+) -> std::io::Result<ProxyHandle> {
     let invalid = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, e);
     let template = &cfg.block_page.template;
     let block_page =
@@ -279,11 +295,27 @@ pub async fn start(
     let leaves = if cfg.tls.intercept { Some(Arc::new(load_ca(&cfg, &sys)?)) } else { None };
     let listener = TcpListener::bind(cfg.listen).await?;
     let local_addr = listener.local_addr()?;
+    let transparent = if cfg.transparent.enabled {
+        let http = TcpListener::bind(cfg.transparent.http_listen).await?;
+        let tls = TcpListener::bind(cfg.transparent.tls_listen).await?;
+        Some((http, tls))
+    } else {
+        None
+    };
+    let transparent_addrs = match &transparent {
+        Some((h, t)) => Some((h.local_addr()?, t.local_addr()?)),
+        None => None,
+    };
+    let mut own = vec![local_addr];
+    own.extend(transparent_addrs.iter().flat_map(|(h, t)| [*h, *t]));
+    let resolver = resolver.or_else(crate::policy::test_hosts_resolver);
     let (tx, rx) = watch::channel(false);
     let auth = cfg.proxy_auth.as_ref().map(|a| ProxyAuth::new(&a.username, &a.password_hash.0));
     let mode = if cfg.mode == Mode::Monitor { "monitor" } else { "enforce" };
     let deps = Arc::new(ProxyDeps {
-        policy: DestPolicy::new(cfg.destination.deny_private_ranges, vec![local_addr]),
+        policy: DestPolicy::new(cfg.destination.deny_private_ranges, own),
+        orig_dst: orig_dst
+            .unwrap_or_else(|| transparent::original_dst_source(cfg.transparent.orig_dst)),
         limits: Limits::new(&cfg.limits, cfg.http.compat),
         resolver: resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
         stats: Arc::new(Stats::default()),
@@ -312,10 +344,16 @@ pub async fn start(
     let watcher =
         lists.spawn_watcher(Duration::from_secs(deps.cfg.blocklists.reload_interval_secs), sys);
     let stats_task = tokio::spawn(stats_loop(Arc::clone(&deps)));
-    let accept = tokio::spawn(accept_loop(listener, Arc::clone(&deps)));
+    let mut accept =
+        vec![tokio::spawn(accept_loop(listener, Arc::clone(&deps), Listener::Explicit))];
+    if let Some((http, tls)) = transparent {
+        accept.push(tokio::spawn(accept_loop(http, Arc::clone(&deps), Listener::TransparentHttp)));
+        accept.push(tokio::spawn(accept_loop(tls, Arc::clone(&deps), Listener::TransparentTls)));
+    }
     Ok(ProxyHandle {
         local_addr,
         deps,
+        transparent_addrs,
         shutdown: tx,
         accept,
         background: vec![watcher, stats_task],
@@ -366,7 +404,15 @@ async fn stats_loop(deps: Arc<ProxyDeps>) {
     }
 }
 
-async fn accept_loop(listener: TcpListener, deps: Arc<ProxyDeps>) {
+/// Which listener a connection arrived on.
+#[derive(Debug, Clone, Copy)]
+enum Listener {
+    Explicit,
+    TransparentHttp,
+    TransparentTls,
+}
+
+async fn accept_loop(listener: TcpListener, deps: Arc<ProxyDeps>, kind: Listener) {
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(x) => x,
@@ -386,10 +432,25 @@ async fn accept_loop(listener: TcpListener, deps: Arc<ProxyDeps>) {
                 return;
             };
             // Panic isolation: a panic in one connection never affects others (SPEC 9).
-            let served =
-                AssertUnwindSafe(pipeline::serve_connection(stream, peer, Arc::clone(&deps), None))
+            let served = match kind {
+                Listener::Explicit => {
+                    let via = pipeline::Via::Explicit;
+                    AssertUnwindSafe(pipeline::serve_connection(
+                        stream,
+                        peer,
+                        Arc::clone(&deps),
+                        via,
+                    ))
                     .catch_unwind()
-                    .await;
+                    .await
+                }
+                Listener::TransparentHttp | Listener::TransparentTls => {
+                    let tls = matches!(kind, Listener::TransparentTls);
+                    AssertUnwindSafe(transparent::serve(stream, peer, Arc::clone(&deps), tls))
+                        .catch_unwind()
+                        .await
+                }
+            };
             if served.is_err() {
                 deps.logger.system().event(
                     SysEvent::PanicIsolated,

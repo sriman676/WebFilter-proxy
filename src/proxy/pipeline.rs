@@ -39,9 +39,12 @@ pub(crate) enum Outcome {
 /// A request-level failure. `status: None` means a response was already started, so the
 /// connection is just closed (never a second response, SPEC 4.15 (5)).
 #[derive(Debug)]
-pub(crate) struct Fail {
+pub struct Fail {
+    /// Status to answer with.
     pub status: Option<u16>,
+    /// Logged reason.
     pub reason: Reason,
+    /// Short log message.
     pub error: &'static str,
 }
 
@@ -90,6 +93,28 @@ pub struct Tunnel {
     pub ech: bool,
     /// Authenticated CONNECT user.
     pub user: Option<String>,
+    /// Transparent TLS: the redirected original destination (SPEC 4.17).
+    pub orig_dst: Option<SocketAddr>,
+    /// Transparent TLS: SNI resolved to the original IP (`None` when not checked).
+    pub host_verified: Option<bool>,
+}
+
+/// How a connection reached the pipeline.
+#[derive(Debug, Clone)]
+pub enum Via {
+    /// The explicit proxy listener.
+    Explicit,
+    /// Inside an intercepted TLS tunnel (CONNECT or transparent TLS).
+    Tunnel(Arc<Tunnel>),
+    /// The transparent HTTP listener; the redirected original destination (SPEC 4.17).
+    Transparent(SocketAddr),
+}
+
+/// Transparent log fields (SPEC 4.17).
+pub(crate) fn note_transparent(ev: &mut RequestEvent, orig: SocketAddr) {
+    ev.transparent = true;
+    ev.orig_dst_ip = Some(orig.ip().to_string());
+    ev.orig_dst_port = Some(orig.port());
 }
 
 /// Query parameter names only (D-18).
@@ -214,12 +239,8 @@ pub(crate) async fn send_fail<S: AsyncWrite + Unpin>(
 }
 
 /// Serve one client connection (or one intercepted tunnel) until it closes or must be closed.
-pub async fn serve_connection<S>(
-    mut client: S,
-    peer: SocketAddr,
-    deps: Arc<ProxyDeps>,
-    tunnel: Option<Arc<Tunnel>>,
-) where
+pub async fn serve_connection<S>(mut client: S, peer: SocketAddr, deps: Arc<ProxyDeps>, via: Via)
+where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let mut buf = Vec::new();
@@ -229,12 +250,20 @@ pub async fn serve_connection<S>(
         idle_secs = deps.cfg.timeouts.client_keepalive_idle;
         let limits = deps.limits;
         let mut ev = deps.new_event(peer);
-        if let Some(tn) = &tunnel {
-            ev.tls_intercepted = true;
-            ev.tls_sni.clone_from(&tn.sni);
-            ev.ech_present = tn.ech;
-            ev.proxy_user.clone_from(&tn.user);
-            ev.alpn = Some("http/1.1".into());
+        match &via {
+            Via::Tunnel(tn) => {
+                ev.tls_intercepted = true;
+                ev.tls_sni.clone_from(&tn.sni);
+                ev.ech_present = tn.ech;
+                ev.proxy_user.clone_from(&tn.user);
+                ev.alpn = Some("http/1.1".into());
+                if let Some(orig) = tn.orig_dst {
+                    note_transparent(&mut ev, orig);
+                    ev.host_verified = tn.host_verified;
+                }
+            }
+            Via::Transparent(orig) => note_transparent(&mut ev, *orig),
+            Via::Explicit => {}
         }
         let started = Instant::now();
         let head =
@@ -256,16 +285,8 @@ pub async fn serve_connection<S>(
         ev.user_agent =
             single(&head.headers, "user-agent").map(|v| String::from_utf8_lossy(v).into_owned());
 
-        let outcome = handle_request(
-            &mut client,
-            &mut buf,
-            &head,
-            &mut ev,
-            &deps,
-            peer.ip(),
-            tunnel.as_deref(),
-        )
-        .await;
+        let outcome =
+            handle_request(&mut client, &mut buf, &head, &mut ev, &deps, peer.ip(), &via).await;
         ev.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let keep_alive = match outcome {
             Ok(Outcome::Forwarded { keep_alive }) => keep_alive,
@@ -342,21 +363,32 @@ async fn handle_request<S>(
     ev: &mut RequestEvent,
     deps: &Arc<ProxyDeps>,
     peer: IpAddr,
-    tunnel: Option<&Tunnel>,
+    via: &Via,
 ) -> Result<Outcome, Fail>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    // 2. Validate. 3. Auth (on the plain listener; tunnels inherit the CONNECT identity).
+    // 2. Validate. 3. Auth (on the plain listener; tunnels inherit the CONNECT identity;
+    // transparent clients are unaware of the proxy and cannot authenticate, A-37).
     let framing = validate_request(head).map_err(head_fail)?;
-    let t = match tunnel {
-        Some(tn) => {
-            if head.method == "CONNECT" {
-                return Err(fail(400, Reason::InvalidRequest, "CONNECT inside a tunnel"));
-            }
-            tunnel_target(head, tn)?
+    if head.method == "CONNECT" && !matches!(via, Via::Explicit) {
+        return Err(fail(400, Reason::InvalidRequest, "CONNECT inside a tunnel or transparent"));
+    }
+    let t = match via {
+        Via::Tunnel(tn) => tunnel_target(head, tn)?,
+        Via::Transparent(orig) => {
+            let t = super::transparent::http_target(head, *orig)?;
+            note_target(ev, &t);
+            check_port(PortKind::Http, t.port, &deps.cfg.ports)
+                .map_err(|r| fail(403, r, "port not allowed"))?;
+            // Destination policy on the ORIGINAL address (SPEC 4.17).
+            deps.policy.check_ip(orig.ip(), orig.port()).map_err(|r| match r {
+                Reason::LoopDetected => fail(508, r, "loop detected"),
+                r => fail(403, r, "destination not allowed"),
+            })?;
+            t
         }
-        None => {
+        Via::Explicit => {
             deps.authorize(head, ev, peer).await?;
             if head.method == "CONNECT" {
                 return super::connect::handle_connect(client, buf, head, ev, deps, peer).await;
@@ -384,10 +416,15 @@ where
         send_block(client, ev, &d, deps).await;
         return Ok(Outcome::Done);
     }
-    // 6/9. Resolve once (tunnels reuse the CONNECT-time addresses); rule 3 per address.
-    let ips = match tunnel {
-        Some(tn) => tn.ips.clone(),
-        None => resolve(&t, ev, deps).await?,
+    // 6/9. Resolve once (tunnels reuse the CONNECT-time addresses, transparent requests go only
+    // to the original destination, D-42); rule 3 per address.
+    let ips = match via {
+        Via::Tunnel(tn) => tn.ips.clone(),
+        Via::Transparent(orig) => {
+            super::transparent::verify_host(&t, orig.ip(), ev, deps).await?;
+            vec![orig.ip()]
+        }
+        Via::Explicit => resolve(&t, ev, deps).await?,
     };
     if let Some(d) = resolved_rule(deps, &t, &ips) {
         note_decision(ev, &d);
@@ -399,9 +436,9 @@ where
     // 10. Fresh upstream connection (D-07), verified TLS inside tunnels (D-20).
     let (tcp, ip) = connect_upstream(&ips, t.port, deps).await?;
     ev.dest_ip = Some(ip.to_string());
-    let upstream: UpstreamBox = match tunnel {
-        Some(tn) => Box::new(upstream_tls(tcp, &tn.host, deps, None).await?),
-        None => Box::new(tcp),
+    let upstream: UpstreamBox = match via {
+        Via::Tunnel(tn) => Box::new(upstream_tls(tcp, &tn.host, deps, None).await?),
+        Via::Transparent(_) | Via::Explicit => Box::new(tcp),
     };
     forward(client, buf, head, ev, deps, &t, framing, websocket, upstream).await
 }

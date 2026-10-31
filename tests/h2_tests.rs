@@ -18,7 +18,7 @@ use bytes::Bytes;
 use common::{ProxyHarness, TestPki, TestResolver, base_config, status};
 use h2::client::SendRequest;
 use http::{Request, Response};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -183,17 +183,7 @@ async fn tunnel(
         head.push(b[0]);
     }
     assert!(head.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&head));
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(CertificateDer::from_pem_slice(ca_pem.as_bytes()).unwrap()).unwrap();
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
-    tokio_rustls::TlsConnector::from(Arc::new(config))
+    tokio_rustls::TlsConnector::from(common::client_config(ca_pem, alpn))
         .connect(ServerName::try_from("h2.test").unwrap(), s)
         .await
         .unwrap()
