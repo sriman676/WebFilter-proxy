@@ -3,7 +3,7 @@
 
 use std::net::IpAddr;
 
-use crate::blocklist::Blocklists;
+use crate::blocklist::{Blocklists, DomainSet, IpSet, PatternSet};
 use crate::config::{Mode, RuleConfig};
 use crate::normalize::{Host, NormalizedTarget};
 use crate::reason::Reason;
@@ -139,44 +139,73 @@ pub fn evaluate(
     rules: &RuleConfig,
     mode: Mode,
 ) -> Decision {
+    evaluate_at(t, phase, lists, rules, mode, time::OffsetDateTime::now_utc())
+}
+
+/// [`evaluate`] at a given time (category schedules, A-27). Order: allowlist, default lists,
+/// config extension/content-type rules, then each enabled category active at `now`.
+pub fn evaluate_at(
+    t: &NormalizedTarget,
+    phase: Phase<'_>,
+    lists: &Blocklists,
+    rules: &RuleConfig,
+    mode: Mode,
+    now: time::OffsetDateTime,
+) -> Decision {
     if allowlisted(&t.host, &rules.allow_domains) {
         return Decision::allowlisted();
     }
-    let block = |reason, id: String, list| Decision::block(mode, reason, id, list);
-    let domain_rule = || t.host.domain().and_then(|d| lists.domains.matches(d));
+    let defaults = ["domains.txt", "url_patterns.txt", "ip_blocklist.txt"];
+    if let Some(d) =
+        match_lists(t, phase, (&lists.domains, &lists.patterns, &lists.ips), defaults, mode)
+    {
+        return d;
+    }
+    let block = |reason, id: String| Decision::block(mode, reason, id, "config");
     match phase {
-        Phase::ConnectPreDns => {
-            if let Some(entry) = domain_rule() {
-                return block(Reason::DomainBlocklist, format!("domain:{entry}"), "domains.txt");
-            }
-        }
         Phase::PreDns => {
-            if let Some(entry) = domain_rule() {
-                return block(Reason::DomainBlocklist, format!("domain:{entry}"), "domains.txt");
-            }
-            if let Some(id) = lists.patterns.matches(&t.views) {
-                return block(Reason::UrlPattern, format!("url:{id}"), "url_patterns.txt");
-            }
             if let Some(ext) = blocked_extension(&t.path, rules) {
-                return block(
-                    Reason::Extension,
-                    format!("ext:{}", ext.to_ascii_lowercase()),
-                    "config",
-                );
-            }
-        }
-        Phase::Resolved { ip } => {
-            if let Some(net) = lists.ips.matches(ip) {
-                return block(Reason::IpBlocklist, format!("ip:{net}"), "ip_blocklist.txt");
+                return block(Reason::Extension, format!("ext:{}", ext.to_ascii_lowercase()));
             }
         }
         Phase::ResponseHeaders { content_type: Some(ct) } => {
             let media = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
             if rules.blocked_content_types.iter().any(|b| b.eq_ignore_ascii_case(&media)) {
-                return block(Reason::ContentType, format!("ctype:{media}"), "config");
+                return block(Reason::ContentType, format!("ctype:{media}"));
             }
         }
-        Phase::ResponseHeaders { content_type: None } => {}
+        _ => {}
+    }
+    for cat in lists.categories.iter().filter(|c| c.enabled && c.schedule.is_active(now)) {
+        let l = &cat.lists;
+        let files = [l.files[0].as_str(), l.files[1].as_str(), l.files[2].as_str()];
+        if let Some(d) = match_lists(t, phase, (&l.domains, &l.patterns, &l.ips), files, mode) {
+            return Decision { category: Some(cat.name.clone()), ..d };
+        }
     }
     Decision::allow()
+}
+
+/// Rules 2-4 against one list triple for the given phase.
+fn match_lists(
+    t: &NormalizedTarget,
+    phase: Phase<'_>,
+    (domains, patterns, ips): (&DomainSet, &PatternSet, &IpSet),
+    files: [&str; 3],
+    mode: Mode,
+) -> Option<Decision> {
+    let block = |reason, id: String, list| Some(Decision::block(mode, reason, id, list));
+    let domain = || t.host.domain().and_then(|d| domains.matches(d));
+    match phase {
+        Phase::ConnectPreDns | Phase::PreDns if let Some(entry) = domain() => {
+            block(Reason::DomainBlocklist, format!("domain:{entry}"), files[0])
+        }
+        Phase::PreDns => patterns
+            .matches(&t.views)
+            .and_then(|id| block(Reason::UrlPattern, format!("url:{id}"), files[1])),
+        Phase::Resolved { ip } => ips
+            .matches(ip)
+            .and_then(|net| block(Reason::IpBlocklist, format!("ip:{net}"), files[2])),
+        _ => None,
+    }
 }

@@ -21,6 +21,7 @@ pub fn corpus_lists() -> Blocklists {
         domains: parse_domains("evil.com\n").unwrap().list,
         patterns: parse_patterns("/admin/\n").unwrap().list,
         ips: parse_ips("127.0.0.1\n::1\n").unwrap().list,
+        categories: vec![],
     }
 }
 

@@ -61,6 +61,9 @@ pub enum ListError {
         /// Non-blank, non-comment lines.
         total: usize,
     },
+    /// A category schedule or the UTC offset is invalid.
+    #[error("schedule: {0}")]
+    Schedule(String),
     /// The combined regex set failed to compile.
     #[error("regex set: {0}")]
     RegexSet(String),
@@ -392,7 +395,33 @@ pub fn parse_ips(text: &str) -> Result<Parsed<IpSet>, ListError> {
 // ---------------------------------------------------------------------------------------------
 // Loaded lists and hot reload
 
-/// All three lists, immutable once built.
+/// One list triple plus the file names used as `rule_list` in logs.
+#[derive(Debug)]
+pub struct ListSet {
+    /// Domain entries.
+    pub domains: DomainSet,
+    /// URL patterns.
+    pub patterns: PatternSet,
+    /// IP networks.
+    pub ips: IpSet,
+    /// File names: domains, url patterns, ip list.
+    pub files: [String; 3],
+}
+
+/// A named category (A-27).
+#[derive(Debug)]
+pub struct Category {
+    /// Name (block page, logs).
+    pub name: String,
+    /// Switched on in config.
+    pub enabled: bool,
+    /// When it blocks.
+    pub schedule: crate::schedule::Schedule,
+    /// Its lists.
+    pub lists: ListSet,
+}
+
+/// The default lists and the categories, immutable once built.
 #[derive(Debug)]
 pub struct Blocklists {
     /// `domains.txt`.
@@ -401,6 +430,8 @@ pub struct Blocklists {
     pub patterns: PatternSet,
     /// `ip_blocklist.txt`.
     pub ips: IpSet,
+    /// Named categories, in config order.
+    pub categories: Vec<Category>,
 }
 
 /// Counts and warnings from a load.
@@ -433,27 +464,55 @@ fn read_list(path: &Path) -> Result<String, ListError> {
 impl Blocklists {
     /// Read and parse all three files; any unusable file fails the whole load.
     pub fn load(cfg: &BlocklistConfig) -> Result<(Self, LoadReport), ListError> {
-        let domains = parse_domains(&read_list(&cfg.domains)?)?;
-        let patterns = parse_patterns(&read_list(&cfg.url_patterns)?)?;
-        let ips = parse_ips(&read_list(&cfg.ip_blocklist)?)?;
-        let mut warnings = Vec::new();
-        for (file, w) in [
-            (&cfg.domains, &domains.warnings),
-            (&cfg.url_patterns, &patterns.warnings),
-            (&cfg.ip_blocklist, &ips.warnings),
-        ] {
-            let name = file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
-            warnings.extend(w.iter().map(|w| format!("{name}: {w}")));
-        }
-        let report = LoadReport {
-            domains: domains.entries,
-            regexes: patterns.entries,
-            ips: ips.entries,
-            warnings,
-            duplicates: domains.duplicates + patterns.duplicates + ips.duplicates,
-        };
-        Ok((Self { domains: domains.list, patterns: patterns.list, ips: ips.list }, report))
+        let mut report = LoadReport::default();
+        let main = load_set([&cfg.domains, &cfg.url_patterns, &cfg.ip_blocklist], &mut report)?;
+        let offset = crate::schedule::parse_offset(&cfg.utc_offset).map_err(ListError::Schedule)?;
+        let categories = cfg
+            .categories
+            .iter()
+            .map(|c| {
+                Ok(Category {
+                    name: c.name.clone(),
+                    enabled: c.enabled,
+                    schedule: crate::schedule::Schedule::parse(&c.active, offset)
+                        .map_err(ListError::Schedule)?,
+                    lists: load_set(c.files(), &mut report)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ListError>>()?;
+        Ok((
+            Self { domains: main.domains, patterns: main.patterns, ips: main.ips, categories },
+            report,
+        ))
     }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Load one triple of list files (an empty path = an empty list) and add to `report`.
+fn load_set(files: [&PathBuf; 3], report: &mut LoadReport) -> Result<ListSet, ListError> {
+    let read =
+        |p: &PathBuf| if p.as_os_str().is_empty() { Ok(String::new()) } else { read_list(p) };
+    let [d, u, i] = files;
+    let domains = parse_domains(&read(d)?)?;
+    let patterns = parse_patterns(&read(u)?)?;
+    let ips = parse_ips(&read(i)?)?;
+    for (file, w) in [(d, &domains.warnings), (u, &patterns.warnings), (i, &ips.warnings)] {
+        let name = file_name(file);
+        report.warnings.extend(w.iter().map(|w| format!("{name}: {w}")));
+    }
+    report.domains += domains.entries;
+    report.regexes += patterns.entries;
+    report.ips += ips.entries;
+    report.duplicates += domains.duplicates + patterns.duplicates + ips.duplicates;
+    Ok(ListSet {
+        domains: domains.list,
+        patterns: patterns.list,
+        ips: ips.list,
+        files: files.map(|p| file_name(p)),
+    })
 }
 
 /// Outcome of a reload attempt.
@@ -494,7 +553,8 @@ impl BlocklistHandle {
 
     fn stamp_of(cfg: &BlocklistConfig) -> Stamp {
         [&cfg.domains, &cfg.url_patterns, &cfg.ip_blocklist]
-            .iter()
+            .into_iter()
+            .chain(cfg.categories.iter().flat_map(|c| c.files()))
             .map(|p| std::fs::metadata(p).ok().and_then(|m| Some((m.len(), m.modified().ok()?))))
             .collect()
     }

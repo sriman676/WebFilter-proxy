@@ -358,6 +358,10 @@ pub struct BlocklistConfig {
     pub ip_blocklist: PathBuf,
     /// Reload poll interval in seconds.
     pub reload_interval_secs: u64,
+    /// UTC offset for category schedules, e.g. `"+05:30"` (A-27).
+    pub utc_offset: String,
+    /// Named, switchable, optionally scheduled list categories (A-27).
+    pub categories: Vec<CategoryConfig>,
 }
 
 impl Default for BlocklistConfig {
@@ -367,7 +371,44 @@ impl Default for BlocklistConfig {
             url_patterns: PathBuf::from("blocklists/url_patterns.txt"),
             ip_blocklist: PathBuf::from("blocklists/ip_blocklist.txt"),
             reload_interval_secs: 5,
+            utc_offset: "+00:00".to_owned(),
+            categories: Vec::new(),
         }
+    }
+}
+
+/// `[[blocklists.categories]]` (A-27): a named set of list files, switchable and scheduled.
+/// Empty paths mean "no list of that kind"; `active` empty = always active.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CategoryConfig {
+    /// Name shown on the block page and in logs (`[a-z0-9_-]`, 1-32 chars).
+    pub name: String,
+    /// Switch the category on/off.
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
+    /// Domain list (same grammar as domains.txt).
+    #[serde(default)]
+    pub domains: PathBuf,
+    /// URL pattern list.
+    #[serde(default)]
+    pub url_patterns: PathBuf,
+    /// IP/CIDR list.
+    #[serde(default)]
+    pub ip_blocklist: PathBuf,
+    /// Time windows when the category blocks, e.g. `["Mon-Fri 09:00-17:00"]`.
+    #[serde(default)]
+    pub active: Vec<String>,
+}
+
+fn enabled_default() -> bool {
+    true
+}
+
+impl CategoryConfig {
+    /// The category's list files (empty paths for kinds it does not use).
+    pub fn files(&self) -> [&PathBuf; 3] {
+        [&self.domains, &self.url_patterns, &self.ip_blocklist]
     }
 }
 
@@ -642,6 +683,13 @@ impl Config {
         self.blocklists.domains = r("blocklists.domains", &self.blocklists.domains)?;
         self.blocklists.url_patterns = r("blocklists.url_patterns", &self.blocklists.url_patterns)?;
         self.blocklists.ip_blocklist = r("blocklists.ip_blocklist", &self.blocklists.ip_blocklist)?;
+        for cat in &mut self.blocklists.categories {
+            for path in [&mut cat.domains, &mut cat.url_patterns, &mut cat.ip_blocklist] {
+                if !path.as_os_str().is_empty() {
+                    *path = r("blocklists.categories", path)?;
+                }
+            }
+        }
         if self.tls.intercept {
             self.tls.ca_dir = r("tls.ca_dir", &self.tls.ca_dir)?;
         }
@@ -697,6 +745,7 @@ impl Config {
         ] {
             check_readable_file(key, path)?;
         }
+        self.validate_categories()?;
         if !self.block_page.template.as_os_str().is_empty() {
             check_readable_file("block_page.template", &self.block_page.template)?;
         }
@@ -705,6 +754,38 @@ impl Config {
         }
         if self.tls.intercept {
             check_private_dir("tls.ca_dir", &self.tls.ca_dir)?;
+        }
+        Ok(())
+    }
+
+    /// Category names unique and well-formed, files readable, schedules parse (A-27).
+    fn validate_categories(&self) -> Result<(), ConfigError> {
+        const KEY: &str = "blocklists.categories";
+        let offset = crate::schedule::parse_offset(&self.blocklists.utc_offset)
+            .map_err(|e| invalid("blocklists.utc_offset", e))?;
+        let mut names = std::collections::HashSet::new();
+        for cat in &self.blocklists.categories {
+            let name_ok = (1..=32).contains(&cat.name.len())
+                && cat.name.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                });
+            if !name_ok || !names.insert(cat.name.as_str()) {
+                return Err(invalid(
+                    KEY,
+                    format!(
+                        "invalid or duplicate category name {:?} (use [a-z0-9_-], 1-32 chars)",
+                        cat.name
+                    ),
+                ));
+            }
+            if cat.files().iter().all(|p| p.as_os_str().is_empty()) {
+                return Err(invalid(KEY, format!("category {:?} has no list files", cat.name)));
+            }
+            for path in cat.files().into_iter().filter(|p| !p.as_os_str().is_empty()) {
+                check_readable_file(KEY, path)?;
+            }
+            crate::schedule::Schedule::parse(&cat.active, offset)
+                .map_err(|e| invalid(KEY, format!("{}: {e}", cat.name)))?;
         }
         Ok(())
     }
