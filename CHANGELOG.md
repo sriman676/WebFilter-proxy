@@ -2,6 +2,15 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-8-complete] - 2026-10-31 - Phase 8: hardening, performance, release (pentest in the final run, A-29)
+### Added
+- `just load` (offline load generator, L-01..L-05; D-34 met with wide margins), `just compat` (C-01..C-09),
+  `just release-audit` (feature/strings check, geiger, SBOM, gitleaks), `just e2e`, `just acceptance`.
+- `deploy/` systemd unit (hardened) and non-root Dockerfile; README quick start, customization, deployment,
+  architecture and limitations.
+### Fixed
+- PF-8-01: minted leaves lacked AKI/EKU and were rejected by strict validators.
+
 ## [phase-7-complete] - 2026-10-31 - Phase 7: transparent mode (Linux lab; pentest in the final run, A-29)
 ### Added
 - Transparent HTTP and TLS listeners (SPEC 4.17): `OriginalDst` via `SO_ORIGINAL_DST` (`nix`, no unsafe), conntrack

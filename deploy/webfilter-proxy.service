@@ -1,0 +1,31 @@
+# systemd unit example (PT-8.4). Install the binary to /usr/local/bin, the config to /etc/webfilter,
+# create the user: useradd --system --home-dir /var/lib/webfilter webfilter
+[Unit]
+Description=WebFilter Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=webfilter
+ExecStart=/usr/local/bin/webfilter-proxy --config /etc/webfilter/config.toml run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadWritePaths=/var/log/webfilter /var/lib/webfilter
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -182,6 +182,10 @@ impl CaStore {
         params.not_before = now - time::Duration::minutes(5);
         params.not_after = now + LEAF_VALIDITY;
         params.serial_number = Some(random_serial()?);
+        // Strict validators (OpenSSL X509_STRICT, e.g. Python >= 3.13) require AKI (C-03).
+        params.use_authority_key_identifier_extension = true;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         let cert = params.signed_by(&key, &self.issuer).map_err(cert_err)?;
         Ok((vec![cert.der().clone()], PrivateKeyDer::Pkcs8(key.serialize_der().into())))
     }

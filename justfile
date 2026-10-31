@@ -64,7 +64,11 @@ audit:
     cargo geiger --all-features
 
 sbom:
-    cargo cyclonedx --format json
+    if command -v cargo-cyclonedx >/dev/null; then cargo cyclonedx --format json; else python3 scripts/sbom.py Cargo.lock > webfilter.cdx.json; fi
+release-audit:
+    scripts/release_audit.sh
+compat:
+    scripts/compat.sh
 
 # --- fuzzing ----------------------------------------------------------------------------
 fuzz-smoke secs="60":
@@ -106,10 +110,11 @@ pentest-p13:
     @echo "TODO: pentest-p13 lands in Phase 13 (PENTEST_PLAN_EXT PT-13.x)" >&2; exit 1
 
 # --- end-to-end and external suites (later phases) --------------------------------------
+# Offline end-to-end suites that drive the real proxy/client (E-xx; E-28/E-41/E-44..50 have own recipes).
 e2e:
-    @echo "TODO: e2e lands in Phase 1 (offline end-to-end tests, TEST_PLAN E-xx)" >&2; exit 1
+    cargo nextest run --locked --features insecure-test --test client_e2e --test cli_check_config --test proxy_integration --test proxy_security --test tls_tests --test h2_tests --test transparent_tests --test observability_tests
 load:
-    @echo "TODO: load lands in Phase 8 (TEST_PLAN L-xx, D-34)" >&2; exit 1
+    scripts/load.sh
 # Offline detection/template checks (TEST_PLAN section 8 fallback) and the live OpenSearch run (A-14).
 siem-test:
     python3 scripts/siem/siem_test.py
@@ -131,4 +136,4 @@ ui-lint:
 ui-e2e:
     @echo "TODO: ui-e2e lands in Phase 11 (headless browser, E-72, E-80)" >&2; exit 1
 acceptance:
-    @echo "TODO: acceptance lands in Phase 8 (docs/ACCEPTANCE.md runs everything)" >&2; exit 1
+    scripts/acceptance.sh

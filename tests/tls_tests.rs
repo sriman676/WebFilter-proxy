@@ -78,6 +78,12 @@ fn leaf_san_validity_key_type_and_unique_serials() {
         let (_, cert) = x509_parser::parse_x509_certificate(chain[0].as_ref()).unwrap();
         let san = cert.subject_alternative_name().unwrap().unwrap().value.general_names.clone();
         assert_eq!(san.len(), 1, "SAN = exactly the requested host");
+        // C-03 regression: strict X.509 validators need AKI; leaves are server-auth only.
+        let oids: Vec<String> = cert.extensions().iter().map(|e| e.oid.to_id_string()).collect();
+        for (oid, name) in [("2.5.29.35", "authority key id"), ("2.5.29.37", "extended key usage")]
+        {
+            assert!(oids.iter().any(|o| o == oid), "missing {name}");
+        }
         let lifetime =
             cert.validity().not_after.timestamp() - cert.validity().not_before.timestamp();
         assert!((24 * 3600..=24 * 3600 + 600).contains(&lifetime), "about 24 h, got {lifetime}");

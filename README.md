@@ -3,16 +3,66 @@
 Multi-threaded HTTP/HTTPS forward proxy with blocklists, optional TLS interception and SIEM-ready JSON
 logs, plus a client that fetches URLs through the proxy and saves them as named HTML files.
 
-> Status: instruction scaffold. Build it with Claude Code: open this folder with `claude`, paste the
-> kickoff prompt from the Prompts section below, and run `/build-phase 0`.
+> Security lab project. Bind to loopback (the default); intercept only your own devices (D-30).
 
-## Planned usage
+## Features
+- **Filtering on every request** (D-10): domain lists (suffix match), URL regexes, IP/CIDR lists, blocked
+  extensions and response content types, allowlist, named categories with time schedules, monitor mode.
+- **Strict HTTP/1 core** (own parser, D-05): smuggling-resistant framing, canonical URLs (dual parser),
+  DNS resolved once and connected by validated IP (no rebinding), private ranges and metadata IPs denied.
+- **HTTPS**: CONNECT passthrough, or opt-in interception with a local CA (upstream TLS always verified),
+  HTTP/2 by ALPN mirroring (never translated) with a flood guard, websocket relay.
+- **Transparent mode** (Linux netns lab only), proxy auth (argon2id), per-IP connection limits.
+- **Logs**: JSON lines (request, system, stats), no secrets/bodies/query values, rotation; OpenSearch
+  stack and 16 detections in `siem/opensearch/`.
+- **Client**: fetches URLs through the proxy, verifies TLS, follows redirects safely, saves named HTML files.
+
+## Quick start
 ```bash
-cp config/config.example.toml config/config.toml   # hardened defaults; for local-origin experiments use config/demo.toml
-cargo run --bin webfilter-proxy -- --config config/config.toml run
-cargo run --bin webfilter-client -- https://example.com https://rust-lang.org
-# -> output/example.com.html, output/rust-lang.org.html
+cp config/config.example.toml config/config.toml   # hardened defaults; config/demo.toml for local origins
+cargo run --release --bin webfilter-proxy -- --config config/config.toml check-config
+cargo run --release --bin webfilter-proxy -- --config config/config.toml run      # 127.0.0.1:8080
+cargo run --release --bin webfilter-client -- https://example.com https://rust-lang.org
+# -> output/example.com.html, output/rust-lang.org.html; blocked URLs print BLOCKED and exit 3
+curl -x http://127.0.0.1:8080 http://example.com/   # any proxy-aware client works
+scripts/demo.sh                                    # the assignment demo, fully offline
 ```
+Proxy CLI: `run` (default), `check-config`, `blocklist test <url>`, `hash-password` (stdin), `ca generate|export`;
+global `--config`, `--listen`, `--mode enforce|monitor`, `--log-dir`. Signals: SIGHUP reloads lists,
+SIGUSR1 reopens logs, SIGINT/SIGTERM drain and stop. Client: `webfilter-client --help` (`--proxy`,
+`--out-dir`, `--name`, `--ca-cert`, `--jobs`, `--max-bytes`, `--save-blocked`, `--json`; exit 0 ok,
+1 error, 2 usage, 3 blocked).
+
+## Customization
+- Lists: `blocklists/*.txt` (hot-reloaded); test a URL with `webfilter-proxy blocklist test <url>`.
+- Categories with schedules: `[[blocklists.categories]]` with `active = ["Mon-Fri 09:00-17:00"]` (A-27).
+- Block page: `[block_page] template = "..."` with `{url}`, `{host}`, `{reason}`, `{rule_id}`, `{category}`,
+  `{event_id}`, `{timestamp}`, all HTML-escaped (A-26).
+- Parser strictness: `[http] compat = true` tolerates a few legacy client quirks (A-25).
+- Every key: `config/config.example.toml`; limits and timeouts have validated ranges.
+
+## Deployment
+`deploy/webfilter-proxy.service` (systemd, non-root, `NoNewPrivileges`, `ProtectSystem=strict`, ...) and
+`deploy/Dockerfile` (non-root, read-only root). Listening beyond loopback requires `[proxy_auth]` (D-13).
+Performance on loopback (`just load`): 2,000 req/s with +0.15 ms p99, ~18,000 req/s max, 1,000 connections
+in ~32 MB RSS (D-34).
+
+## Architecture
+```
+client -> listener (explicit | transparent http/tls) -> pipeline per request (src/proxy/pipeline.rs)
+   validate (http1.rs) -> auth -> canonicalize (normalize.rs) -> port/destination policy (policy.rs)
+   -> rules before DNS (filter.rs, blocklist.rs) -> resolve once -> IP rules -> fresh upstream
+   -> response rules (content type) -> stream back            every request: one JSON event (logger.rs)
+CONNECT -> passthrough relay | interception (connect.rs, tls.rs) -> same pipeline, or h2 core (h2.rs)
+```
+Facts live in `docs/` (start at `docs/INDEX.md`): behavior in SPEC, decisions in DECISIONS(+_ADDENDUM),
+threats in THREAT_MODEL, tests in TEST_PLAN, pentests in `docs/pentest/`.
+
+## Limitations (by design)
+QUIC/HTTP3 is not proxied (disable it in the browser; the lab rejects udp/443). ECH hides the server name
+(passthrough rules then see only IPs; transparent mode blocks ECH by default). Certificate-pinned apps and
+mTLS client certificates fail under interception (add them to `tls.passthrough_domains`). No h2c, no
+HTTP/1<->HTTP/2 translation. Transparent mode is Linux-only and sees only redirected ports.
 ## HTTPS interception (optional, lab only)
 > **Ethics and scope (D-30, D-68):** interception decrypts other people's traffic. Only intercept your own
 > devices or users who were told, on your own machine or lab. Never install the CA on machines you do not own.

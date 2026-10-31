@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# TEST_PLAN C-01..C-09 with real clients through the proxy (loopback only). Writes the results table
+# to docs/pentest/phase-8/COMPATIBILITY.md (A-38). C-06 (browsers) stays a manual checklist there.
+set -uo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+WORK=$(mktemp -d); PIDS=(); RESULTS=()
+trap 'kill "${PIDS[@]}" 2>/dev/null; rm -rf "$WORK"' EXIT
+cd "$ROOT"
+cargo build --quiet --release --locked --bin webfilter-proxy --example loadgen || exit 1
+T="${CARGO_TARGET_DIR:-$ROOT/target}/release"
+rec() { # id description command...
+  local id=$1 what=$2; shift 2
+  if "$@" >"$WORK/$id.out" 2>&1; then RESULTS+=("| $id | $what | PASS |"); echo "PASS  $id $what"
+  else RESULTS+=("| $id | $what | FAIL |"); echo "FAIL  $id $what"; tail -3 "$WORK/$id.out"; fi
+}
+skip() { RESULTS+=("| $1 | $2 | SKIP ($3) |"); echo "SKIP  $1 $2 ($3)"; }
+
+# Origin: /big (1 MiB, Range), /sse (chunked stream), static files (dumb git over HTTP).
+mkdir -p "$WORK/www" && git init -q --bare "$WORK/www/repo.git" && git -C "$WORK/www/repo.git" update-server-info
+python3 - "$WORK/www" > "$WORK/origin.port" <<'PY' &
+import http.server, sys, os, time
+os.chdir(sys.argv[1]); BIG = bytes(i % 251 for i in range(1 << 20))
+class H(http.server.SimpleHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path == "/big":
+            rng = self.headers.get("Range")
+            start = int(rng.split("=")[1].split("-")[0]) if rng else 0
+            body = BIG[start:]
+            self.send_response(206 if rng else 200)
+            if rng: self.send_header("Content-Range", f"bytes {start}-{len(BIG)-1}/{len(BIG)}")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        elif self.path == "/sse":
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
+            for i in range(3):
+                chunk = f"data: {i}\n\n".encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk)); self.wfile.flush(); time.sleep(0.2)
+            self.wfile.write(b"0\r\n\r\n")
+        else:
+            super().do_GET()
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(srv.server_address[1], flush=True); srv.serve_forever()
+PY
+PIDS+=($!)
+"$T/examples/loadgen" origin --tls "$WORK/origin-ca.pem" > "$WORK/tls.port" & PIDS+=($!)
+sleep 1; OP=$(cat "$WORK/origin.port"); TP=$(cat "$WORK/tls.port")
+mk_cfg() { # name listen intercept
+  mkdir -p "$WORK/$1/blocklists"; for f in domains url_patterns ip_blocklist; do : > "$WORK/$1/blocklists/$f.txt"; done
+  cat > "$WORK/$1/config.toml" <<CFG
+listen = "$2"
+[ports]
+http_allowed = "any"
+connect_allowed = "any"
+[destination]
+deny_private_ranges = false
+[logging]
+dir = "$WORK/$1/logs"
+[tls]
+intercept = $3
+ca_dir = "$WORK/$1/ca"
+upstream_ca_bundle = "$WORK/origin-ca.pem"
+CFG
+  "$T/webfilter-proxy" --config "$WORK/$1/config.toml" run 2>"$WORK/$1.err" & PIDS+=($!)
+}
+mk_cfg plain 127.0.0.1:18101 false; mk_cfg mitm 127.0.0.1:18102 true; mk_cfg v6 "[::1]:18103" false
+sleep 1
+O="http://127.0.0.1:$OP"; PX=http://127.0.0.1:18101; MX=http://127.0.0.1:18102
+
+rec C-01a "curl plain HTTP"            curl -sf -x $PX "$O/big" -o /dev/null
+rec C-01b "curl HTTPS tunnel (passthrough)" curl -sf -x $PX --cacert "$WORK/origin-ca.pem" "https://localhost:$TP/" -o /dev/null
+rec C-01c "curl HTTPS intercepted with the proxy CA" curl -sf -x $MX --cacert "$WORK/mitm/ca/ca.pem" "https://localhost:$TP/" -o /dev/null
+rec C-02  "wget via http_proxy"        env http_proxy=$PX wget -q -O /dev/null "$O/big"
+rec C-03  "Python urllib via HTTPS_PROXY (requests not installed)" python3 -c "
+import os, ssl, urllib.request
+h = urllib.request.ProxyHandler({'http': '$PX', 'https': '$MX'})
+ctx = ssl.create_default_context(cafile='$WORK/mitm/ca/ca.pem')
+op = urllib.request.build_opener(h, urllib.request.HTTPSHandler(context=ctx))
+assert op.open('$O/big').read()[:3] == bytes([0, 1, 2])
+assert op.open('https://localhost:$TP/').status == 200"
+rec C-04  "git ls-remote over the proxy (dumb HTTP)" git -c http.proxy=$PX ls-remote "$O/repo.git"
+rec C-05  "HTTP/1.0 client" bash -c "printf 'GET $O/big HTTP/1.0\r\nHost: 127.0.0.1:$OP\r\n\r\n' | timeout 5 curl -s telnet://127.0.0.1:18101 | head -1 | grep -q '200'"
+rec C-07  "Range resume (206)" bash -c "curl -sf -x $PX -r 1000- '$O/big' -o '$WORK/part' -w '%{http_code}' | grep -q 206 && [[ \$(stat -c %s '$WORK/part') -eq $(( (1<<20) - 1000 )) ]]"
+rec C-08  "chunked streaming (SSE) arrives incrementally" bash -c "curl -sN -x $PX '$O/sse' | grep -c '^data:' | grep -qx 3"
+rec C-09  "IPv6 loopback listener" curl -sf -x "http://[::1]:18103" "$O/big" -o /dev/null
+skip C-06 "Firefox/Chromium manual checklist" "manual, see below"
+
+{
+  echo "# Compatibility results (TEST_PLAN C-01..C-09, Phase 8)"
+  echo
+  echo "Generated by \`scripts/compat.sh\` on $(date -u +%Y-%m-%d) (loopback; release build)."
+  echo
+  echo "| ID | Client / case | Result |"; echo "|---|---|---|"
+  printf '%s\n' "${RESULTS[@]}"
+  echo
+  echo "## C-06 manual browser checklist (throwaway profile, proxy 127.0.0.1:8080, test CA imported)"
+  echo "- [ ] load local test sites over http and https (intercepted)"
+  echo "- [ ] a large download completes; a websocket page connects"
+  echo "- [ ] an HTTP/2-preferring site works (h2 mirrored, or h1 when the origin lacks h2)"
+  echo "- [ ] blocked site shows the block page; event id matches the log"
+} > "$ROOT/docs/pentest/phase-8/COMPATIBILITY.md"
+grep -q "| FAIL |" "$ROOT/docs/pentest/phase-8/COMPATIBILITY.md" && { echo "COMPAT FAIL"; exit 1; }
+echo "COMPAT PASS"
