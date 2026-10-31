@@ -8,11 +8,14 @@ use crate::config::{Mode, RuleConfig};
 use crate::normalize::{Host, NormalizedTarget};
 use crate::reason::Reason;
 
-/// Evaluation phase: PreDns = rules 1,2,4,5; Resolved = rule 3; ResponseHeaders = rule 6.
+/// Evaluation phase: PreDns = rules 1,2,4,5; ConnectPreDns = rules 1,2 (passthrough tunnels see
+/// no URL); Resolved = rule 3; ResponseHeaders = rule 6.
 #[derive(Debug, Clone, Copy)]
 pub enum Phase<'a> {
     /// Before resolution.
     PreDns,
+    /// Before resolution of a passthrough CONNECT.
+    ConnectPreDns,
     /// For each resolved (or literal) destination IP.
     Resolved {
         /// Destination IP.
@@ -57,6 +60,8 @@ pub struct Decision {
     pub rule_list: Option<String>,
     /// A rule matched but monitor mode allowed the request.
     pub would_block: bool,
+    /// List category of the matching rule (A-27).
+    pub category: Option<String>,
 }
 
 impl Decision {
@@ -68,6 +73,7 @@ impl Decision {
             rule_id: None,
             rule_list: None,
             would_block: false,
+            category: None,
         }
     }
 
@@ -88,6 +94,7 @@ impl Decision {
             rule_id: Some(rule_id),
             rule_list: Some(list.to_owned()),
             would_block: monitor,
+            category: None,
         }
     }
 
@@ -136,9 +143,15 @@ pub fn evaluate(
         return Decision::allowlisted();
     }
     let block = |reason, id: String, list| Decision::block(mode, reason, id, list);
+    let domain_rule = || t.host.domain().and_then(|d| lists.domains.matches(d));
     match phase {
+        Phase::ConnectPreDns => {
+            if let Some(entry) = domain_rule() {
+                return block(Reason::DomainBlocklist, format!("domain:{entry}"), "domains.txt");
+            }
+        }
         Phase::PreDns => {
-            if let Some(entry) = t.host.domain().and_then(|d| lists.domains.matches(d)) {
+            if let Some(entry) = domain_rule() {
                 return block(Reason::DomainBlocklist, format!("domain:{entry}"), "domains.txt");
             }
             if let Some(id) = lists.patterns.matches(&t.views) {

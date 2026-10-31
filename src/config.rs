@@ -102,6 +102,8 @@ pub struct Config {
     pub proxy_auth: Option<ProxyAuthConfig>,
     /// HTTP/1 parser options (A-25).
     pub http: HttpConfig,
+    /// Block page template (A-26).
+    pub block_page: BlockPageConfig,
     /// HTTP/2 flood limits (D-45).
     pub http2: Http2Config,
     /// Transparent mode (D-41..D-43).
@@ -146,6 +148,7 @@ impl Default for Config {
             tls: TlsConfig::default(),
             proxy_auth: None,
             http: HttpConfig::default(),
+            block_page: BlockPageConfig::default(),
             http2: Http2Config::default(),
             transparent: TransparentConfig::default(),
             admin: AdminConfig::default(),
@@ -428,6 +431,15 @@ pub struct ProxyAuthConfig {
     pub password_hash: Redacted<String>,
 }
 
+/// `[block_page]` (A-26): an HTML template with `{url}`, `{host}`, `{reason}`, `{rule_id}`,
+/// `{category}`, `{event_id}`, `{timestamp}` placeholders (always HTML-escaped).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BlockPageConfig {
+    /// Template file; empty = built-in page.
+    pub template: PathBuf,
+}
+
 /// `[http]` HTTP/1 parser options (A-25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -633,6 +645,9 @@ impl Config {
         if self.tls.intercept {
             self.tls.ca_dir = r("tls.ca_dir", &self.tls.ca_dir)?;
         }
+        if !self.block_page.template.as_os_str().is_empty() {
+            self.block_page.template = r("block_page.template", &self.block_page.template)?;
+        }
         if !self.tls.upstream_ca_bundle.as_os_str().is_empty() {
             self.tls.upstream_ca_bundle =
                 r("tls.upstream_ca_bundle", &self.tls.upstream_ca_bundle)?;
@@ -681,6 +696,9 @@ impl Config {
             ("blocklists.ip_blocklist", &self.blocklists.ip_blocklist),
         ] {
             check_readable_file(key, path)?;
+        }
+        if !self.block_page.template.as_os_str().is_empty() {
+            check_readable_file("block_page.template", &self.block_page.template)?;
         }
         if !self.tls.upstream_ca_bundle.as_os_str().is_empty() {
             check_readable_file("tls.upstream_ca_bundle", &self.tls.upstream_ca_bundle)?;

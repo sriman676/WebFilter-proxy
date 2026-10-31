@@ -508,3 +508,14 @@ proptest! {
         let _ = parse_response_head(&bytes, &LIMITS);
     }
 }
+
+#[test]
+fn websocket_upgrade_survives_connection_naming_it() {
+    // Regression (found by I-17): `Connection: Upgrade` names `upgrade` as hop-by-hop; a validated
+    // websocket handshake must still forward `Upgrade: websocket`.
+    let (h, _) = req(&get("Connection: Upgrade\r\nUpgrade: websocket\r\n")).unwrap();
+    assert!(
+        forward_headers(&h.headers, true).iter().any(|(n, v)| n == "upgrade" && v == b"websocket")
+    );
+    assert!(!forward_headers(&h.headers, false).iter().any(|(n, _)| n == "upgrade"));
+}
