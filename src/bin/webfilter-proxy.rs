@@ -2,12 +2,13 @@
 #![forbid(unsafe_code)]
 
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
-use webfilter::blocklist::Blocklists;
-use webfilter::config::{Config, EXIT_INVALID_CONFIG};
+use clap::{Parser, Subcommand, ValueEnum};
+use webfilter::blocklist::{Blocklists, ReloadOutcome};
+use webfilter::config::{Config, EXIT_INVALID_CONFIG, Mode};
 use webfilter::filter::{Phase, evaluate};
 use webfilter::normalize::{TargetContext, canonicalize};
 
@@ -17,16 +18,31 @@ struct Cli {
     /// Path to the TOML configuration file.
     #[arg(long, global = true, default_value = "config/config.toml")]
     config: PathBuf,
+    /// Override `listen` (CLI wins over the file).
+    #[arg(long, global = true)]
+    listen: Option<SocketAddr>,
+    /// Override `mode`.
+    #[arg(long, global = true)]
+    mode: Option<CliMode>,
+    /// Override `logging.dir`.
+    #[arg(long, global = true)]
+    log_dir: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliMode {
+    Enforce,
+    Monitor,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the proxy (default).
+    Run,
     /// Validate the configuration and exit (0 = valid, 2 = invalid).
     CheckConfig,
-    /// Run the proxy (implemented in Phase 2).
-    Run,
     /// Blocklist tools.
     Blocklist {
         #[command(subcommand)]
@@ -45,11 +61,27 @@ enum BlocklistCommand {
     },
 }
 
-fn load(path: &Path) -> Result<Config, ExitCode> {
-    Config::load(path).map_err(|e| {
+/// Load the file, apply CLI overrides, re-validate (CLI wins, SPEC 6).
+fn load(cli: &Cli) -> Result<Config, ExitCode> {
+    let invalid = |e: String| {
         eprintln!("error: {e}");
         ExitCode::from(EXIT_INVALID_CONFIG)
-    })
+    };
+    let mut cfg = Config::load(&cli.config).map_err(|e| invalid(e.to_string()))?;
+    if let Some(listen) = cli.listen {
+        cfg.listen = listen;
+    }
+    if let Some(mode) = cli.mode {
+        cfg.mode = match mode {
+            CliMode::Enforce => Mode::Enforce,
+            CliMode::Monitor => Mode::Monitor,
+        };
+    }
+    if let Some(dir) = &cli.log_dir {
+        cfg.logging.dir = std::path::absolute(dir).map_err(|e| invalid(e.to_string()))?;
+    }
+    cfg.validate().map_err(|e| invalid(e.to_string()))?;
+    Ok(cfg)
 }
 
 fn blocklist_test(cfg: &Config, url: &str) -> ExitCode {
@@ -101,27 +133,66 @@ fn hash_password() -> ExitCode {
     }
 }
 
+/// Serve until SIGINT/SIGTERM; SIGHUP reloads blocklists, SIGUSR1 reopens logs (D-31, D-67).
+async fn serve(cfg: Config) -> std::io::Result<()> {
+    let handle = webfilter::proxy::start(cfg, None).await?;
+    eprintln!("webfilter-proxy listening on {}", handle.local_addr);
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (mut term, mut hup, mut usr1) = (
+            signal(SignalKind::terminate())?,
+            signal(SignalKind::hangup())?,
+            signal(SignalKind::user_defined1())?,
+        );
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break,
+                _ = term.recv() => break,
+                _ = hup.recv() => {
+                    if let ReloadOutcome::Failed(e) = handle.deps.lists.reload() {
+                        eprintln!("blocklist reload failed (previous lists kept): {e}");
+                    }
+                }
+                _ = usr1.recv() => handle.deps.logger.reopen(),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
+    eprintln!("shutting down (draining connections)");
+    handle.shutdown().await;
+    Ok(())
+}
+
+fn run(cfg: Config) -> ExitCode {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(cfg.effective_worker_threads())
+        .enable_all()
+        .build();
+    match runtime.and_then(|rt| rt.block_on(serve(cfg))) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let cfg = || load(&cli.config);
     match &cli.command {
-        Command::HashPassword => hash_password(),
-        Command::CheckConfig => match cfg() {
+        Some(Command::HashPassword) => hash_password(),
+        Some(Command::CheckConfig) => match load(&cli) {
             Ok(c) => {
                 println!("config OK: {} (listen {})", cli.config.display(), c.listen);
                 ExitCode::SUCCESS
             }
             Err(code) => code,
         },
-        Command::Blocklist { command: BlocklistCommand::Test { url } } => {
-            cfg().map_or_else(|code| code, |c| blocklist_test(&c, url))
+        Some(Command::Blocklist { command: BlocklistCommand::Test { url } }) => {
+            load(&cli).map_or_else(|code| code, |c| blocklist_test(&c, url))
         }
-        Command::Run => cfg().map_or_else(
-            |code| code,
-            |_| {
-                eprintln!("TODO: `run` is implemented in Phase 2");
-                ExitCode::FAILURE
-            },
-        ),
+        Some(Command::Run) | None => load(&cli).map_or_else(|code| code, run),
     }
 }

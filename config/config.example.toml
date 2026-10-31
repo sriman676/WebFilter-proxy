@@ -59,6 +59,9 @@ upstream_ca_bundle = ""          # optional extra roots (PEM); verification is a
 # username = "analyst"
 # password_hash = "$argon2id$..."   # from: webfilter-proxy hash-password
 
+[block_page]                     # A-26: custom 403 page; placeholders {url} {host} {reason} {rule_id} {category} {event_id} {timestamp}
+template = ""                    # empty = built-in page; values are always HTML-escaped
+
 [http]                           # HTTP/1 parser (A-25); strict by default
 compat = false                   # true: allow lowercase methods + chunk extensions (never relaxes anti-smuggling rules)
 

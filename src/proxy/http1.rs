@@ -445,7 +445,7 @@ pub fn forward_headers(headers: &Headers, keep_upgrade: bool) -> Headers {
             ) || n.starts_with("proxy-")
                 || (n == "te" && !v.eq_ignore_ascii_case(b"trailers"))
                 || (n == "upgrade" && !keep_upgrade)
-                || named.iter().any(|t| t == n);
+                || (named.iter().any(|t| t == n) && !(keep_upgrade && n == "upgrade"));
             !hop
         })
         .cloned()
