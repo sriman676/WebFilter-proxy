@@ -33,3 +33,4 @@ feeds/
 *.profdata
 lcov.info
 .claude/settings.local.json
+/webfilter.cdx.json
