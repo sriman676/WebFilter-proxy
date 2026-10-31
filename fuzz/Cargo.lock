@@ -1780,6 +1780,7 @@ name = "webfilter-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "url",
  "webfilter",
 ]
 

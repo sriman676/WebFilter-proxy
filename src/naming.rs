@@ -115,7 +115,17 @@ pub fn output_filename(original: &str) -> String {
         if path.is_empty() { String::new() } else { format!("_{path}") }
     );
 
-    let mut stem = sanitize(&raw);
+    sanitized_name(&raw)
+}
+
+/// SPEC 5.3 steps 7-10 on any raw stem: sanitize, truncate with a hash, reserved-name prefix,
+/// `.html`. Also used for a user-supplied `--name` (SPEC 5.1).
+///
+/// ```
+/// assert_eq!(webfilter::naming::sanitized_name("my page"), "my_page.html");
+/// ```
+pub fn sanitized_name(raw: &str) -> String {
+    let mut stem = sanitize(raw);
     if stem.len() > MAX_STEM {
         let head: String = stem.chars().take(110).collect();
         stem = format!("{}_{}", head.trim_end_matches(['.', '_', '-']), sha8(&stem));

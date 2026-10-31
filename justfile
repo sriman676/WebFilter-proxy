@@ -38,6 +38,9 @@ test:
 cov:
     cargo llvm-cov nextest --locked --features insecure-test --json --summary-only | python3 scripts/cov_gate.py
 
+demo:
+    scripts/demo.sh
+
 docs-check:
     python3 scripts/docs_check.py
 
@@ -79,7 +82,7 @@ pentest-p1:
 pentest-p2:
     scripts/pentest_p2.sh
 pentest-p3:
-    @echo "TODO: pentest-p3 lands in Phase 3 (PENTEST_PLAN PT-3.x)" >&2; exit 1
+    scripts/pentest_p3.sh
 pentest-p4:
     @echo "TODO: pentest-p4 lands in Phase 4 (PENTEST_PLAN PT-4.x)" >&2; exit 1
 pentest-p5:

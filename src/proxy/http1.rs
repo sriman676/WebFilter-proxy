@@ -443,6 +443,7 @@ pub fn forward_headers(headers: &Headers, keep_upgrade: bool) -> Headers {
                     | "content-length"
                     | "host"
             ) || n.starts_with("proxy-")
+                || n.starts_with("x-webfilter-") // only the proxy itself may set these (PF-3-01)
                 || (n == "te" && !v.eq_ignore_ascii_case(b"trailers"))
                 || (n == "upgrade" && !keep_upgrade)
                 || (named.iter().any(|t| t == n) && !(keep_upgrade && n == "upgrade"));
