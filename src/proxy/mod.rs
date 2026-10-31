@@ -299,10 +299,13 @@ pub async fn start(
         SysEvent::ProxyStart,
         serde_json::json!({ "listen": local_addr.to_string(), "mode": mode }),
     );
+    let source = deps.cfg.source.as_ref().map(|p| p.display().to_string());
+    sys.event(SysEvent::ConfigLoaded, serde_json::json!({ "source": source, "mode": mode }));
     sys.event(
         SysEvent::BlocklistLoaded,
         serde_json::json!({ "domains": report.domains, "regexes": report.regexes, "ips": report.ips, "warnings": report.warnings }),
     );
+    sys.insecure_files(deps.cfg.policy_files());
 
     let watcher =
         lists.spawn_watcher(Duration::from_secs(deps.cfg.blocklists.reload_interval_secs), sys);

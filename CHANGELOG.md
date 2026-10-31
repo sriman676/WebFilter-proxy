@@ -2,6 +2,16 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-5-complete] - 2026-10-31 - Phase 5: observability, OpenSearch, detections (M2 complete; pentest in the final run, A-29)
+### Added
+- SIEM on OpenSearch instead of Splunk (A-14, A-35): `siem/opensearch/` (compose with security plugin, Fluent Bit,
+  index templates, 16 detections in `detections.json`, DETECTIONS.md), `scripts/siem/` (evaluator, labelled dataset
+  generator, offline `just siem-test` in `just test`, live `just siem-e2e`), `just pentest-p5`.
+- System events: `config_loaded` with the config path; `insecure_permissions` for world-writable policy files (PT-5.4).
+- Tests: E-25 rotation with 16 writers, PT-5.1 injection end to end, PT-5.4.
+### Removed
+- `splunk/` configs (superseded by A-14).
+
 ## [phase-4-complete] - 2026-10-31 - Phase 4: TLS interception (pentest in the final run, A-29)
 ### Added
 - `tls` module: CA store (`ca generate|export`, safe key loading A-33), P-256 leaf minting with cache, ClientHello

@@ -1,6 +1,6 @@
 # WebFilter Proxy (Rust) - project memory
 
-Multi-threaded HTTP/HTTPS forward proxy (blocklists, TLS interception, HTTP/2, transparent mode, Splunk-ready JSON logs)
+Multi-threaded HTTP/HTTPS forward proxy (blocklists, TLS interception, HTTP/2, transparent mode, SIEM-ready JSON logs (OpenSearch, A-14))
 + a client that fetches URLs through it and saves named HTML files. Security-focused lab project.
 
 ## How to work
@@ -19,7 +19,7 @@ Rust **1.99.0** (edition 2024) pinned in `rust-toolchain.toml`; `Cargo.lock` com
 phase starts. Never write a crate API from memory: read docs.rs for the resolved version. Python scripts: >= 3.10 stdlib only.
 
 ## Commands (create the `justfile` in Phase 0)
-`just check-env | fmt | lint | test | e2e | cov | fuzz-smoke | audit | sbom | load | pentest-p1..p13 | ui-lint | ui-e2e | feeds-test | scan-e2e | promtool | splunk-e2e | e2e-netns | h2spec | docs-check | acceptance`
+`just check-env | fmt | lint | test | e2e | cov | fuzz-smoke | audit | sbom | load | pentest-p1..p13 | ui-lint | ui-e2e | feeds-test | scan-e2e | promtool | siem-test | siem-e2e | e2e-netns | h2spec | docs-check | acceptance`
 Run proxy: `cargo run --bin webfilter-proxy -- --config config/config.toml run`. Client: `cargo run --bin webfilter-client -- https://example.com`.
 
 ## Non-negotiable code rules

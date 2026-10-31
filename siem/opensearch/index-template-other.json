@@ -1,0 +1,52 @@
+{
+ "index_patterns": [
+  "webfilter-system*",
+  "webfilter-stats*",
+  "webfilter-admin*",
+  "webfilter-access*"
+ ],
+ "priority": 100,
+ "template": {
+  "settings": {
+   "number_of_shards": 1,
+   "number_of_replicas": 0
+  },
+  "mappings": {
+   "dynamic_templates": [
+    {
+     "strings": {
+      "match_mapping_type": "string",
+      "mapping": {
+       "type": "keyword",
+       "ignore_above": 1024
+      }
+     }
+    }
+   ],
+   "properties": {
+    "timestamp": {
+     "type": "date",
+     "format": "strict_date_optional_time"
+    },
+    "event_type": {
+     "type": "keyword"
+    },
+    "kind": {
+     "type": "keyword"
+    },
+    "detail": {
+     "type": "flat_object"
+    },
+    "remote_addr": {
+     "type": "keyword"
+    },
+    "top_blocked": {
+     "type": "flat_object"
+    },
+    "lists": {
+     "type": "flat_object"
+    }
+   }
+  }
+ }
+}

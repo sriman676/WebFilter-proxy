@@ -4,7 +4,7 @@
 - All tests run offline on loopback with generated PKI and local origins (D-29). No flaky sleeps:
   use readiness probes/channels with timeouts.
 - Every bug found (by tests, fuzzing or pentest) gets a regression test BEFORE the fix.
-- Pyramid: unit (U) > property (P) > fuzz (F) > integration (I) > end-to-end (E) > load (L) > Splunk (S).
+- Pyramid: unit (U) > property (P) > fuzz (F) > integration (I) > end-to-end (E) > load (L) > SIEM (S).
 - Coverage gate (cargo-llvm-cov): >= 85% lines for blocklist, normalize, policy, filter, logger, naming;
   >= 70% overall. Gate enforced in `just cov` and CI.
 - `just test` = unit+property+integration; `just e2e` = E-suite; `just acceptance` = everything + all pentest automation.
@@ -94,7 +94,7 @@ I-transparent-http / I-transparent-tls: full transparent flows using `FixedOrigi
 | E-25 | rotation under 16 concurrent writers (small `max_bytes`) | no lost/partial/duplicated lines across files |
 | E-26 | 200 MB streamed response | proxy RSS growth < 50 MB; client `--max-bytes` honoured |
 | E-27 | websocket echo through proxy; URL rule on handshake | works; blocked handshake 403 |
-| E-28 | Splunk ingest (Docker): proxy logs -> index; saved searches | fields extracted; searches return expected counts |
+| E-28 | OpenSearch ingest (Docker, `just siem-e2e`): proxy logs -> Fluent Bit -> indices; detections | every line indexed; detections equal the offline evaluation |
 | E-29 | same URL fetched twice | `name.html` and `name-1.html`; no overwrite; symlink pre-planted not followed |
 | E-30 | canary secrets in Cookie/Authorization/Proxy-Authorization/Set-Cookie/query value/body | canary absent from all logs |
 | E-31 | chunked POST body 5 MB | origin receives identical bytes |
@@ -163,12 +163,12 @@ L-01 oha 2,000 rps plain HTTP 60 s: 0 errors, p99 added latency < 15 ms vs direc
 connections: RSS < 200 MB. L-03 slow-client mix (slowhttptest) while load runs: healthy clients unaffected.
 L-04 intercepted HTTPS 500 rps, cache hit ratio reported. L-05 1 h soak: RSS slope ~0, fd count stable. L-06 repeat L-01/L-02 with limits, profiles and metrics on (overhead <= 10 percent). L-07 scanning throughput report (detect vs block).
 
-## 8. Splunk tests (S-xx)
-S-01 `props.conf` extracts every schema field from a 1k-line sample; timestamps correct. S-02 each saved
-search returns expected rows on a generated dataset. S-03 detection replay from PT-5.5. S-04 no search
-returns canary tokens. S-05 the v1.1 searches (rate limiting, malware, feeds, access requests, admin audit) return expected rows on a generated dataset.
-Fallback when Docker is unavailable: validate JSON against the schema with `jq`, and review `props.conf`
-statically; record the limitation in the phase report (not a blocker).
+## 8. SIEM tests (S-xx; OpenSearch, A-14)
+S-01 the index templates map every schema field from a 1k-line sample; timestamps correct. S-02 each
+detection returns expected rows on a generated dataset. S-03 detection replay from PT-5.5. S-04 no query
+returns canary tokens. S-05 the v1.1 detections (rate limiting, malware, feeds, access requests, admin audit) return expected rows on a generated dataset.
+Fallback when Docker is unavailable: `just siem-test` (offline S-01/S-02/S-03/S-05 with the same detection code);
+record the limitation in the phase report (not a blocker).
 
 ## 9. CI matrix
 Ubuntu + macOS: fmt, clippy (`-D warnings`), `cargo nextest`, coverage gate (Linux), e2e (Linux), `cargo deny`,

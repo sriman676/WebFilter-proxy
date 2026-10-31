@@ -6,7 +6,7 @@ filesystem (client output).
 Actors: malicious/compromised LAN client; malicious origin server; network attacker between proxy
 and origin; local unprivileged user on the proxy host; operator error; supply-chain attacker.
 Trust boundaries: B1 clients->proxy, B2 proxy->origins, B3 CA store, B4 config/blocklist files,
-B5 log files -> Splunk, B6 client program -> filesystem.
+B5 log files -> SIEM (Fluent Bit -> OpenSearch), B6 client program -> filesystem.
 
 | ID | STRIDE | Threat | Mitigation (spec) | Verified by |
 |---|---|---|---|---|

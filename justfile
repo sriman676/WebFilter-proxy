@@ -34,6 +34,7 @@ lint:
 test:
     cargo nextest run --locked --features insecure-test --no-tests=pass
     cargo test --locked --features insecure-test --doc
+    python3 scripts/siem/siem_test.py
 
 cov:
     cargo llvm-cov nextest --locked --features insecure-test --json --summary-only | python3 scripts/cov_gate.py
@@ -86,7 +87,7 @@ pentest-p3:
 pentest-p4:
     scripts/pentest_p4.sh
 pentest-p5:
-    @echo "TODO: pentest-p5 lands in Phase 5 (PENTEST_PLAN PT-5.x)" >&2; exit 1
+    scripts/pentest_p5.sh
 pentest-p6:
     @echo "TODO: pentest-p6 lands in Phase 6 (PENTEST_PLAN PT-6.x)" >&2; exit 1
 pentest-p7:
@@ -109,8 +110,11 @@ e2e:
     @echo "TODO: e2e lands in Phase 1 (offline end-to-end tests, TEST_PLAN E-xx)" >&2; exit 1
 load:
     @echo "TODO: load lands in Phase 8 (TEST_PLAN L-xx, D-34)" >&2; exit 1
-splunk-e2e:
-    @echo "TODO: splunk-e2e lands in Phase 5 (TEST_PLAN S-xx)" >&2; exit 1
+# Offline detection/template checks (TEST_PLAN section 8 fallback) and the live OpenSearch run (A-14).
+siem-test:
+    python3 scripts/siem/siem_test.py
+siem-e2e:
+    scripts/siem/siem_e2e.sh
 h2spec:
     @echo "TODO: h2spec lands in Phase 6 (SPEC 4.16)" >&2; exit 1
 e2e-netns:

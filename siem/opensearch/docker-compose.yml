@@ -1,0 +1,45 @@
+# OpenSearch lab stack (A-14, A-28, A-35): security plugin ON, TLS, loopback-only ports, 512 MB heap.
+# Started by scripts/siem/siem_e2e.sh, which writes the gitignored .env with a generated admin password
+# and copies the node's root CA to certs/ so clients verify TLS (lab demo PKI, never reuse elsewhere).
+name: webfilter-siem
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_PASSWORD:?run scripts/siem/siem_e2e.sh}
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports: ["127.0.0.1:9200:9200"]
+    networks:
+      siem:
+        aliases: [node-0.example.com]
+    volumes: [osdata:/usr/share/opensearch/data]
+  fluent-bit:
+    image: fluent/fluent-bit:3.1.9
+    profiles: [ship]
+    environment:
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD}
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - ./certs/root-ca.pem:/certs/root-ca.pem:ro
+      - ${WEBFILTER_LOG_DIR:-../../logs}:/logs:ro
+    networks: [siem]
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.1
+    profiles: [ui]
+    environment:
+      OPENSEARCH_HOSTS: '["https://node-0.example.com:9200"]'
+      OPENSEARCH_SSL_VERIFICATIONMODE: full
+      OPENSEARCH_SSL_CERTIFICATEAUTHORITIES: /certs/root-ca.pem
+    volumes: [./certs/root-ca.pem:/certs/root-ca.pem:ro]
+    ports: ["127.0.0.1:5601:5601"]
+    networks: [siem]
+networks:
+  siem: {}
+volumes:
+  osdata: {}

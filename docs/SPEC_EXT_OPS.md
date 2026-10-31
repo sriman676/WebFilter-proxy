@@ -73,7 +73,7 @@ Enabled when `[access_requests] enabled=true` AND the client's profile has `acce
   it is independent of the 1,000-event admin ring so busy proxies do not lose events. Only real blocks qualify (`action=blocked`), never monitor-mode `would_block`.
 - Accepted only if: CSRF valid and unexpired; `event_id` is in `RecentBlocks` for the SAME `client_id` with an eligible
   reason; <= 3 requests/hour and <= 20 pending per client; body <= 2 KiB `application/x-www-form-urlencoded`. Stored in
-  `state/access_requests.jsonl` (0600); the Splunk log `webfilter_access.jsonl` stores ids, host, reason and justification length only.
+  `state/access_requests.jsonl` (0600); the SIEM log `webfilter_access.jsonl` stores ids, host, reason and justification length only.
 - Decision via API/UI/TUI: approve creates a **temp allow** (scope `client` default or `profile`; host exact-only unless
   `include_subdomains`; TTL default 4 h, max 24 h) stored atomically in `state/temp_allows.json` (0600, schema-validated on load).
   Evaluation order: allowlist, then feed rules (never overridable), then scoped temp allows, then the remaining local rules. A temp allow applies only to its

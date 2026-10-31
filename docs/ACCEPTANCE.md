@@ -13,7 +13,7 @@ Record results in `docs/pentest/FINAL_REPORT.md`.
 | 6 | Fuzz smoke + differential | `just fuzz-smoke` | F-01..F-12, X-01..X-03: no crash/disagreement |
 | 7 | End-to-end (real binaries) | `just e2e` | E-01..E-43 (except E-28 -> step 9, E-41 -> step 10), E-51, E-52 pass |
 | 8 | Network-namespace e2e | `just e2e-netns` | E-44..E-50 pass; teardown leaves host unchanged (PT-7.8) |
-| 9 | Splunk | `just splunk-e2e` | E-28 and S-01..S-04 pass (or documented Docker-less fallback) |
+| 9 | SIEM (OpenSearch, A-14) | `just siem-test` and `just siem-e2e` | E-28 and S-01..S-05 pass (`siem-test` is the Docker-less fallback) |
 | 10 | HTTP/2 conformance | `just h2spec` | 0 mandatory failures (E-41) |
 | 11 | Pentest suites | `just pentest-p1 ... pentest-p8` | every PT case recorded PASS; no open Critical/High |
 | 12 | Load and soak | `just load` | D-34 targets; L-05 soak stable |
@@ -39,7 +39,7 @@ Final: tag `m5-complete`; FINAL_REPORT updated for v1.1.
 ## Part B - Assignment trace and demo (milestone M1)
 Original assignment: *Multi-threaded Proxy Server and Client. The server accepts any URL from the client, fetches
 the output and returns it to the client. The client saves the output as an HTML page with an appropriate name.*
-(Extended with filtering, logging, TLS interception and Splunk.)
+(Extended with filtering, logging, TLS interception and OpenSearch.)
 
 | Requirement | Where implemented | Proof |
 |---|---|---|
