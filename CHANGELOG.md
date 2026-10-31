@@ -2,6 +2,17 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-6-complete] - 2026-10-31 - Phase 6: HTTP/2 inside intercepted TLS (pentest in the final run, A-29)
+### Added
+- ALPN mirroring (D-40): h2 only when both client and origin chose it; never h1<->h2 translation, never h2c.
+- `proxy::h2`: per-stream pipeline (H1-H11) over one upstream h2 connection per client connection; block pages,
+  rule 6 and log fields (`http_version=2`, `alpn`, `h2_stream_id`) over h2.
+- `proxy::h2guard` flood guard (D-45, A-36): rapid reset/ratio, MadeYouReset, control floods, CONTINUATION,
+  stream budget, stall and idle timeouts; `h2_flood` events and stats counter. Fuzz F-10 `h2_frames`.
+- `just pentest-p6`, `just h2spec` (h2spec via socat CONNECT forwarder; skip when tools are missing).
+### Fixed
+- PF-6-01: floods stopped by `h2`'s built-in limits were not logged as `h2_flood`.
+
 ## [phase-5-complete] - 2026-10-31 - Phase 5: observability, OpenSearch, detections (M2 complete; pentest in the final run, A-29)
 ### Added
 - SIEM on OpenSearch instead of Splunk (A-14, A-35): `siem/opensearch/` (compose with security plugin, Fluent Bit,

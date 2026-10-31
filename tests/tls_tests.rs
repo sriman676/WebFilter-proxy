@@ -92,10 +92,14 @@ fn leaf_san_validity_key_type_and_unique_serials() {
 fn leaf_cache_reuses_and_is_bounded_per_host() {
     let dir = tempfile::tempdir().unwrap();
     let leaves = LeafCache::new(CaStore::generate(&dir.path().join("ca")).unwrap());
-    let a = leaves.server_config_for(&Host::Domain("a.test".into())).unwrap();
-    let a2 = leaves.server_config_for(&Host::Domain("a.test".into())).unwrap();
+    let a = leaves
+        .server_config_for(&Host::Domain("a.test".into()), vec![b"http/1.1".to_vec()])
+        .unwrap();
+    let a2 = leaves
+        .server_config_for(&Host::Domain("a.test".into()), vec![b"http/1.1".to_vec()])
+        .unwrap();
     assert!(Arc::ptr_eq(&a, &a2), "cached");
-    leaves.server_config_for(&Host::Domain("b.test".into())).unwrap();
+    leaves.server_config_for(&Host::Domain("b.test".into()), vec![b"http/1.1".to_vec()]).unwrap();
     assert_eq!(leaves.cached(), 2);
 }
 

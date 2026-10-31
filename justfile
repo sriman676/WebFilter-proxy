@@ -89,7 +89,7 @@ pentest-p4:
 pentest-p5:
     scripts/pentest_p5.sh
 pentest-p6:
-    @echo "TODO: pentest-p6 lands in Phase 6 (PENTEST_PLAN PT-6.x)" >&2; exit 1
+    scripts/pentest_p6.sh
 pentest-p7:
     @echo "TODO: pentest-p7 lands in Phase 7 (PENTEST_PLAN PT-7.x)" >&2; exit 1
 pentest-p8:
@@ -116,7 +116,7 @@ siem-test:
 siem-e2e:
     scripts/siem/siem_e2e.sh
 h2spec:
-    @echo "TODO: h2spec lands in Phase 6 (SPEC 4.16)" >&2; exit 1
+    scripts/h2spec.sh
 e2e-netns:
     @echo "TODO: e2e-netns lands in Phase 7 (Linux, sudo; D-43)" >&2; exit 1
 feeds-test:

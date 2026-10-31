@@ -552,6 +552,7 @@ pub struct Stats {
     errors: AtomicU64,
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
+    h2_flood: AtomicU64,
     /// Currently open client connections.
     pub active_connections: AtomicU64,
     top: Mutex<HashMap<String, u64>>,
@@ -592,6 +593,7 @@ pub struct StatsEvent {
     pub bytes_out: u64,
     pub active_connections: u64,
     pub dropped_log_events: u64,
+    pub h2_flood: u64,
     pub top_blocked: Vec<HostCount>,
     pub lists: ListCounts,
 }
@@ -621,6 +623,11 @@ impl Stats {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Count an HTTP/2 connection closed by the flood guard (D-45).
+    pub fn record_h2_flood(&self) {
+        self.h2_flood.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Build the window summary and reset the window counters.
     pub fn take_window(&self, window_secs: u64, dropped: u64, lists: ListCounts) -> StatsEvent {
         let take = |a: &AtomicU64| a.swap(0, Ordering::Relaxed);
@@ -643,6 +650,7 @@ impl Stats {
             bytes_out: take(&self.bytes_out),
             active_connections: self.active_connections.load(Ordering::Relaxed),
             dropped_log_events: dropped,
+            h2_flood: take(&self.h2_flood),
             top_blocked: top,
             lists,
         }

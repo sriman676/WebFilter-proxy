@@ -16,7 +16,8 @@ use super::http1::{BodyFraming, RequestHead, ResponseHead, forward_headers, writ
 use super::io::fill;
 use super::pipeline::{
     Fail, Outcome, Tunnel, Upstream, UpstreamBox, client_gone, connect_upstream, fail,
-    note_decision, note_target, resolve, resolved_rule, send_block, serve_connection, write_all,
+    note_decision, note_target, resolve, resolved_rule, send_block, serve_connection, upstream_tls,
+    write_all,
 };
 use crate::filter::{Action, Phase};
 use crate::logger::RequestEvent;
@@ -225,7 +226,26 @@ where
         reason: Reason::InternalError,
         error: "no CA",
     })?;
-    let config = leaves.server_config_for(&t.host).map_err(|_| Fail {
+    // ALPN mirroring (D-40): a client offering h2 makes us ask the origin first; the client is
+    // then offered exactly the protocol the origin selected, so both sides always match.
+    let (alpn, h2_upstream) = if hello.alpn.iter().any(|p| p == b"h2") {
+        let offer: Vec<Vec<u8>> = [&b"h2"[..], b"http/1.1"]
+            .into_iter()
+            .filter(|p| hello.alpn.iter().any(|c| c == p))
+            .map(<[u8]>::to_vec)
+            .collect();
+        let no_page = |f: Fail| Fail { status: None, ..f }; // the 200 was already sent
+        let (tcp, ip) = connect_upstream(&ips, t.port, deps).await.map_err(no_page)?;
+        ev.dest_ip = Some(ip.to_string());
+        let up = upstream_tls(tcp, &t.host, deps, Some(offer)).await.map_err(no_page)?;
+        match up.get_ref().1.alpn_protocol().map(<[u8]>::to_vec) {
+            Some(p) if p == b"h2" => (vec![p], Some((up, ip))),
+            selected => (selected.into_iter().collect(), None), // probe dropped; h1 per request
+        }
+    } else {
+        (hello.alpn.iter().filter(|p| p.as_slice() == b"http/1.1").cloned().collect(), None)
+    };
+    let config = leaves.server_config_for(&t.host, alpn).map_err(|_| Fail {
         status: None,
         reason: Reason::InternalError,
         error: "leaf minting failed",
@@ -244,20 +264,26 @@ where
             error: "client TLS handshake failed",
         })?;
     ev.tls_intercepted = true;
-    ev.alpn = Some("http/1.1".into());
-    let tunnel = Tunnel {
+    let negotiated = tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
+    ev.alpn = Some(if negotiated.as_deref() == Some(b"h2") { "h2" } else { "http/1.1" }.into());
+    let tunnel = Arc::new(Tunnel {
         host: t.host.clone(),
         port: t.port,
         ips,
         sni: hello.sni,
         ech: hello.ech_present,
         user: ev.proxy_user.clone(),
-    };
-    // The CONNECT event is logged now; every inner request gets its own event.
+    });
+    // The CONNECT event is logged when the tunnel ends; every inner request gets its own event.
     let peer = SocketAddr::new(peer, ev.src_port);
-    // Type-erase the stream: serving a tunnel is recursive (it shares the pipeline), and a
-    // concrete nested type would never be finite.
-    serve_tunnel(Box::new(tls), peer, Arc::clone(deps), Arc::new(tunnel)).await;
+    match h2_upstream {
+        Some((up, ip)) if negotiated.as_deref() == Some(b"h2") => {
+            super::h2::serve(tls, up, ip, peer, Arc::clone(deps), tunnel).await;
+        }
+        // Type-erase the stream: serving a tunnel is recursive (it shares the pipeline), and a
+        // concrete nested type would never be finite.
+        _ => serve_tunnel(Box::new(tls), peer, Arc::clone(deps), tunnel).await,
+    }
     Ok(Outcome::Done)
 }
 
