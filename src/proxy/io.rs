@@ -97,6 +97,27 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    copy_body_tap(src, buf, dst, framing, compat, idle, true, &mut |_| true).await
+}
+
+/// [`copy_body`] that also hands every decoded payload chunk to `tap` (download scanning, D-53).
+/// `reframe = false` writes the decoded payload only (close-delimited delivery). When `tap`
+/// returns false the copy stops early with `IoError::Closed` left to the caller to interpret.
+#[allow(clippy::too_many_arguments)]
+pub async fn copy_body_tap<R, W>(
+    src: &mut R,
+    buf: &mut Vec<u8>,
+    dst: &mut W,
+    framing: BodyFraming,
+    compat: bool,
+    idle: Duration,
+    reframe: bool,
+    tap: &mut (dyn FnMut(&[u8]) -> bool + Send),
+) -> Result<u64, IoError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut total = 0u64;
     match framing {
         BodyFraming::None => {}
@@ -108,6 +129,9 @@ where
                 }
                 let take = usize::try_from(remaining).map_or(buf.len(), |r| r.min(buf.len()));
                 let data: Vec<u8> = buf.drain(..take).collect();
+                if !tap(&data) {
+                    return Err(IoError::Closed);
+                }
                 write_all(dst, &data, idle).await?;
                 remaining -= take as u64;
                 total += take as u64;
@@ -121,12 +145,21 @@ where
                 buf.drain(..used.min(buf.len()));
                 if !decoded.is_empty() {
                     total += decoded.len() as u64;
-                    let mut framed = Vec::with_capacity(decoded.len() + 16);
-                    encode_chunk(&decoded, &mut framed);
-                    write_all(dst, &framed, idle).await?;
+                    if !tap(&decoded) {
+                        return Err(IoError::Closed);
+                    }
+                    if reframe {
+                        let mut framed = Vec::with_capacity(decoded.len() + 16);
+                        encode_chunk(&decoded, &mut framed);
+                        write_all(dst, &framed, idle).await?;
+                    } else {
+                        write_all(dst, &decoded, idle).await?;
+                    }
                 }
                 if decoder.is_done() {
-                    write_all(dst, LAST_CHUNK, idle).await?;
+                    if reframe {
+                        write_all(dst, LAST_CHUNK, idle).await?;
+                    }
                     break;
                 }
                 if fill(src, buf, Instant::now() + idle).await? == 0 {
@@ -137,7 +170,11 @@ where
         BodyFraming::CloseDelimited => loop {
             if !buf.is_empty() {
                 total += buf.len() as u64;
-                write_all(dst, &std::mem::take(buf), idle).await?;
+                let data = std::mem::take(buf);
+                if !tap(&data) {
+                    return Err(IoError::Closed);
+                }
+                write_all(dst, &data, idle).await?;
             }
             if fill(src, buf, Instant::now() + idle).await? == 0 {
                 break;

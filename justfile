@@ -101,7 +101,7 @@ pentest-p8:
 pentest-p9:
     scripts/pentest_p9.sh
 pentest-p10:
-    @echo "TODO: pentest-p10 lands in Phase 10 (PENTEST_PLAN_EXT PT-10.x)" >&2; exit 1
+    scripts/pentest_p10.sh
 pentest-p11:
     @echo "TODO: pentest-p11 lands in Phase 11 (PENTEST_PLAN_EXT PT-11.x)" >&2; exit 1
 pentest-p12:
@@ -126,9 +126,9 @@ h2spec:
 e2e-netns:
     scripts/e2e_netns.sh
 feeds-test:
-    @echo "TODO: feeds-test lands in Phase 10 (SPEC_EXT_POLICY P3)" >&2; exit 1
+    cargo nextest run --locked --features insecure-test --test feeds_scan_tests
 scan-e2e:
-    @echo "TODO: scan-e2e lands in Phase 10 (Docker clamd, E-63..E-67)" >&2; exit 1
+    scripts/scan_e2e.sh
 promtool:
     @echo "TODO: promtool lands in Phase 11 (metrics format, D-56)" >&2; exit 1
 ui-lint:

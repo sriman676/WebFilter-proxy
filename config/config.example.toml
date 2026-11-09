@@ -97,82 +97,6 @@ ech_action = "block"             # block | ip_only
 orig_dst = "so_original_dst"     # so_original_dst | conntrack
 
 # ---------------- v1.1 features (all OFF by default; see docs/SPEC_EXT_*.md) ----------------
-[[profiles]]
-name = "default"
-scan_downloads = false
-access_requests = false
-# feeds = ["urlhaus"]               # names of enabled [[feeds]] to apply
-[profiles.rate]
-requests_per_sec = 50
-burst = 100
-max_concurrent_connections = 64
-max_inflight_requests = 128
-max_tunnels = 32
-down_bytes_per_sec = 0              # 0 = unlimited
-up_bytes_per_sec = 0
-daily_quota_bytes = 0               # 0 = off
-
-# [[clients]]
-# cidr = "10.0.0.0/24"
-# profile = "default"
-# [[users]]
-# username = "analyst"
-# password_hash = "$argon2id$..."
-# profile = "default"
-
-# [[feeds]]                         # verify the feed's terms of use first (docs/SPEC_EXT_POLICY.md P3)
-# name = "urlhaus"
-# enabled = false
-# url = "https://urlhaus.abuse.ch/downloads/text/"
-# format = "urls_text"
-# refresh_secs = 3600
-# max_bytes = 52428800
-# max_entries = 2000000
-# auth_header_file = ""
-
-[feeds_global]
-protected_domains = ["localhost", "webfilter.local"]
-
-[scan]
-enabled = false
-mode = "detect"                     # detect | block
-max_bytes = 26214400
-max_concurrent = 8
-temp_dir = "../state/scan_tmp"
-temp_quota_bytes = 1073741824
-unscannable_action = "allow"        # default becomes "block" when mode = "block"
-scanner_unavailable_action = "allow"
-extensions = [".exe", ".dll", ".msi", ".zip", ".jar", ".doc", ".docm", ".xls", ".xlsm", ".pdf", ".js", ".ps1", ".sh", ".apk"]
-content_types = ["application/x-msdownload", "application/octet-stream", "application/zip", "application/pdf"]
-magic = true
-hash_blocklist = "blocklists/hash_blocklist.txt"
-[scan.clamd]
-address = ""                        # e.g. "unix:/run/clamav/clamd.ctl" or "tcp:127.0.0.1:3310"
-timeout_secs = 30
-chunk_bytes = 65536
-[scan.yara]
-rules_dir = ""                      # requires the `yara` cargo feature
-timeout_secs = 10
-
-[admin]
-enabled = false
-listen = "127.0.0.1:9090"           # loopback only
-token_hash = ""                     # argon2id hash (webfilter-proxy hash-password)
-ui_enabled = true
-metrics_public = false
-max_body_bytes = 65536
-request_timeout_secs = 10
-max_connections = 64
-
-[access_requests]
-enabled = false
-virtual_host = "webfilter.local"
-default_ttl_secs = 14400
-max_ttl_secs = 86400
-per_client_per_hour = 3
-
-[state]
-dir = "../state"
 
 # ---- v1.1: users, client networks and profiles (Phase 9, D-50/D-51). OFF unless configured. ----
 # Identity: user:<name> when authenticated, else ip:<addr> (IPv6 per /64); X-Forwarded-For is ignored.
@@ -200,3 +124,59 @@ dir = "../state"
 # down_bytes_per_sec = 0           # 0 = unlimited, else >= 4096 (delays bytes, never drops)
 # up_bytes_per_sec = 0
 # daily_quota_bytes = 0            # 0 = off; counters reset at UTC midnight and on restart
+
+# ---- v1.1: threat feeds (Phase 10, D-52). Every feed is OFF until you verify its terms of use and fetch
+# rate and record them with a date in docs/DECISIONS_ADDENDUM.md. HTTPS only, verified, public hosts only.
+# [[feeds]]
+# name = "urlhaus"
+# enabled = false
+# url = "https://urlhaus.abuse.ch/downloads/text/"   # regenerated every 5 min; never fetch more often
+# format = "urls_text"                               # domains_text | hostfile | urls_text | csv_urlhaus | ips_text
+# refresh_secs = 3600                                # >= 300
+# max_bytes = 52428800
+# max_entries = 2000000
+# auth_header_file = ""                              # optional API key file, sent as Auth-Key, never logged
+# expire_after_secs = 604800
+#
+# [feeds_global]
+# dir = "feeds"                                      # versions, active pointer, rollback (webfilter-proxy feeds ...)
+# protected_domains = []                             # plus localhost and webfilter.local, always
+# Profiles opt in with: feeds = ["urlhaus"]
+
+# ---- v1.1: download hashing and scanning (Phase 10, D-53/D-54). OFF; a profile also needs scan_downloads = true.
+# [scan]
+# enabled = false
+# mode = "detect"                  # detect: stream + log verdict | block: buffer, scan, deliver or 403
+# max_bytes = 26214400             # must not exceed clamd StreamMaxLength
+# max_concurrent = 8
+# buffer_timeout_secs = 60
+# temp_dir = "state/scan_tmp"      # 0700; files 0600 with random names; cleaned at start
+# temp_quota_bytes = 1073741824
+# unscannable_action = "allow"     # default: block in block mode, allow in detect mode
+# scanner_unavailable_action = "allow"
+# magic = true
+# hash_blocklist = ""              # SHA-256 hex per line; hot-reloaded
+# [scan.clamd]
+# address = "tcp:127.0.0.1:3310"   # or unix:/run/clamav/clamd.ctl; loopback only (scan/docker-compose.yml)
+# [scan.yara]                      # needs a build with --features yara
+# rules_dir = "yara"
+
+[admin]
+enabled = false
+listen = "127.0.0.1:9090"           # loopback only
+token_hash = ""                     # argon2id hash (webfilter-proxy hash-password)
+ui_enabled = true
+metrics_public = false
+max_body_bytes = 65536
+request_timeout_secs = 10
+max_connections = 64
+
+[access_requests]
+enabled = false
+virtual_host = "webfilter.local"
+default_ttl_secs = 14400
+max_ttl_secs = 86400
+per_client_per_hour = 3
+
+[state]
+dir = "../state"

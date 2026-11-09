@@ -119,12 +119,12 @@ pub struct Config {
     pub clients: Vec<ClientConfig>,
     /// Proxy users (D-50); `[proxy_auth]` stays valid as one user in `default`.
     pub users: Vec<UserConfig>,
-    /// v1.1 placeholder, typed in Phase 10.
-    pub feeds: Option<RawSection>,
-    /// v1.1 placeholder, typed in Phase 10.
-    pub feeds_global: Option<RawSection>,
-    /// v1.1 placeholder, typed in Phase 10.
-    pub scan: Option<RawSection>,
+    /// Threat feeds (SPEC_EXT_POLICY P3); all disabled by default.
+    pub feeds: Vec<FeedConfig>,
+    /// Feed store and protected domains.
+    pub feeds_global: FeedsGlobalConfig,
+    /// Download hashing and scanning (P4); off by default.
+    pub scan: ScanConfig,
     /// v1.1 placeholder, typed in Phase 11.
     pub access_requests: Option<RawSection>,
     /// v1.1 placeholder, typed in Phase 11.
@@ -159,9 +159,9 @@ impl Default for Config {
             profiles: Vec::new(),
             clients: Vec::new(),
             users: Vec::new(),
-            feeds: None,
-            feeds_global: None,
-            scan: None,
+            feeds: Vec::new(),
+            feeds_global: FeedsGlobalConfig::default(),
+            scan: ScanConfig::default(),
             access_requests: None,
             state: None,
         }
@@ -595,6 +595,219 @@ impl Default for RateConfig {
     }
 }
 
+/// Feed file formats (P3).
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedFormat {
+    DomainsText,
+    Hostfile,
+    UrlsText,
+    CsvUrlhaus,
+    IpsText,
+}
+
+/// `[[feeds]]` (D-52).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedConfig {
+    /// `[a-z0-9_-]{1,32}`.
+    pub name: String,
+    /// Fetch and use this feed.
+    #[serde(default)]
+    pub enabled: bool,
+    /// HTTPS URL.
+    pub url: String,
+    /// File format.
+    pub format: FeedFormat,
+    /// Refresh interval (>= 300).
+    #[serde(default = "feed_refresh")]
+    pub refresh_secs: u64,
+    /// Download cap.
+    #[serde(default = "feed_max_bytes")]
+    pub max_bytes: u64,
+    /// Entry cap (global cap 5,000,000).
+    #[serde(default = "feed_max_entries")]
+    pub max_entries: usize,
+    /// File with the API key (header `Auth-Key`); empty = none. Never logged.
+    #[serde(default)]
+    pub auth_header_file: PathBuf,
+    /// Deactivate after this long without a successful update.
+    #[serde(default = "feed_expire")]
+    pub expire_after_secs: u64,
+}
+
+fn feed_refresh() -> u64 {
+    3600
+}
+fn feed_max_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+fn feed_max_entries() -> usize {
+    2_000_000
+}
+fn feed_expire() -> u64 {
+    604_800
+}
+
+/// `[feeds_global]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FeedsGlobalConfig {
+    /// Feed store (`feeds/<name>/v<unix>.list`, `active`).
+    pub dir: PathBuf,
+    /// Never accepted from a feed (in addition to `localhost` and `webfilter.local`).
+    pub protected_domains: Vec<String>,
+}
+
+impl Default for FeedsGlobalConfig {
+    fn default() -> Self {
+        Self { dir: PathBuf::from("feeds"), protected_domains: Vec::new() }
+    }
+}
+
+/// Scan mode (D-53).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanMode {
+    /// Stream unchanged; log the verdict afterwards.
+    #[default]
+    Detect,
+    /// Buffer, scan, then deliver or block.
+    Block,
+}
+
+/// Unscannable / scanner-unavailable action.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanAction {
+    Block,
+    Allow,
+}
+
+/// `[scan]` (SPEC_EXT_POLICY P4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ScanConfig {
+    /// Master switch; a profile must also set `scan_downloads = true`.
+    pub enabled: bool,
+    /// detect | block.
+    pub mode: ScanMode,
+    /// Largest scanned body.
+    pub max_bytes: u64,
+    /// Concurrent scans.
+    pub max_concurrent: usize,
+    /// Block mode: time allowed to receive the body.
+    pub buffer_timeout_secs: u64,
+    /// 0700 directory for 0600 temp files.
+    pub temp_dir: PathBuf,
+    /// Total temp bytes.
+    pub temp_quota_bytes: u64,
+    /// Default: block in block mode, else allow.
+    pub unscannable_action: Option<ScanAction>,
+    /// Default: block in block mode, else allow.
+    pub scanner_unavailable_action: Option<ScanAction>,
+    /// Eligible extensions.
+    pub extensions: Vec<String>,
+    /// Eligible media types.
+    pub content_types: Vec<String>,
+    /// Magic-byte eligibility.
+    pub magic: bool,
+    /// SHA-256 hex list; empty = none.
+    pub hash_blocklist: PathBuf,
+    /// ClamAV daemon.
+    pub clamd: Option<ClamdConfig>,
+    /// YARA (cargo feature `yara`).
+    pub yara: Option<YaraConfig>,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: ScanMode::Detect,
+            max_bytes: 26_214_400,
+            max_concurrent: 8,
+            buffer_timeout_secs: 60,
+            temp_dir: PathBuf::from("state/scan_tmp"),
+            temp_quota_bytes: 1 << 30,
+            unscannable_action: None,
+            scanner_unavailable_action: None,
+            extensions: [
+                ".exe", ".dll", ".msi", ".zip", ".rar", ".7z", ".js", ".jar", ".ps1", ".bat",
+                ".scr", ".apk", ".dmg", ".iso", ".docm", ".xlsm", ".pdf",
+            ]
+            .map(String::from)
+            .to_vec(),
+            content_types: [
+                "application/octet-stream",
+                "application/x-msdownload",
+                "application/zip",
+                "application/x-dosexec",
+                "application/java-archive",
+                "application/pdf",
+            ]
+            .map(String::from)
+            .to_vec(),
+            magic: true,
+            hash_blocklist: PathBuf::new(),
+            clamd: None,
+            yara: None,
+        }
+    }
+}
+
+impl ScanConfig {
+    /// Effective unscannable action.
+    pub fn on_unscannable(&self) -> ScanAction {
+        self.unscannable_action.unwrap_or(self.default_action())
+    }
+    /// Effective scanner-unavailable action.
+    pub fn on_unavailable(&self) -> ScanAction {
+        self.scanner_unavailable_action.unwrap_or(self.default_action())
+    }
+    fn default_action(&self) -> ScanAction {
+        if self.mode == ScanMode::Block { ScanAction::Block } else { ScanAction::Allow }
+    }
+}
+
+/// `[scan.clamd]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClamdConfig {
+    /// `unix:/path` or `tcp:127.0.0.1:3310` (loopback only).
+    pub address: String,
+    /// Per-scan timeout.
+    #[serde(default = "clamd_timeout")]
+    pub timeout_secs: u64,
+    /// INSTREAM chunk size.
+    #[serde(default = "clamd_chunk")]
+    pub chunk_bytes: usize,
+}
+
+fn clamd_timeout() -> u64 {
+    30
+}
+fn clamd_chunk() -> usize {
+    65_536
+}
+
+/// `[scan.yara]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct YaraConfig {
+    /// Directory of operator-trusted `.yar` rules.
+    pub rules_dir: PathBuf,
+    /// Per-scan timeout.
+    #[serde(default = "yara_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn yara_timeout() -> u64 {
+    10
+}
+
 /// `[block_page]` (A-26): an HTML template with `{url}`, `{host}`, `{reason}`, `{rule_id}`,
 /// `{category}`, `{event_id}`, `{timestamp}` placeholders (always HTML-escaped).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -840,6 +1053,19 @@ impl Config {
             self.tls.upstream_ca_bundle =
                 r("tls.upstream_ca_bundle", &self.tls.upstream_ca_bundle)?;
         }
+        self.feeds_global.dir = r("feeds_global.dir", &self.feeds_global.dir)?;
+        for f in &mut self.feeds {
+            if !f.auth_header_file.as_os_str().is_empty() {
+                f.auth_header_file = r("feeds.auth_header_file", &f.auth_header_file)?;
+            }
+        }
+        self.scan.temp_dir = r("scan.temp_dir", &self.scan.temp_dir)?;
+        if !self.scan.hash_blocklist.as_os_str().is_empty() {
+            self.scan.hash_blocklist = r("scan.hash_blocklist", &self.scan.hash_blocklist)?;
+        }
+        if let Some(y) = &mut self.scan.yara {
+            y.rules_dir = r("scan.yara.rules_dir", &y.rules_dir)?;
+        }
         Ok(())
     }
 
@@ -960,7 +1186,90 @@ impl Config {
                 }
             }
         }
-        crate::profiles::PolicySet::build(self).map(|_| ()).map_err(|e| invalid("profiles", e))
+        crate::profiles::PolicySet::build(self).map(|_| ()).map_err(|e| invalid("profiles", e))?;
+        self.validate_feeds_and_scan()
+    }
+
+    /// `[[feeds]]` and `[scan]` (D-52..D-54).
+    fn validate_feeds_and_scan(&self) -> Result<(), ConfigError> {
+        let mut names = std::collections::HashSet::new();
+        let mut total = 0usize;
+        for f in &self.feeds {
+            let name_ok = (1..=32).contains(&f.name.len())
+                && f.name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b));
+            if !name_ok || !names.insert(f.name.as_str()) {
+                return Err(invalid(
+                    "feeds.name",
+                    format!("invalid or duplicate feed name {:?}", f.name),
+                ));
+            }
+            if !f.url.starts_with("https://") || url::Url::parse(&f.url).is_err() {
+                return Err(invalid("feeds.url", format!("{}: an https URL is required", f.name)));
+            }
+            if f.refresh_secs < 300
+                || f.max_entries == 0
+                || f.max_entries > 2_000_000
+                || f.max_bytes == 0
+            {
+                return Err(invalid(
+                    "feeds",
+                    format!(
+                        "{}: refresh_secs >= 300, 1..=2,000,000 entries, max_bytes > 0",
+                        f.name
+                    ),
+                ));
+            }
+            total = total.saturating_add(f.max_entries);
+        }
+        if total > 5_000_000 {
+            return Err(invalid(
+                "feeds.max_entries",
+                "all feeds together may hold at most 5,000,000 entries",
+            ));
+        }
+        for p in &self.profiles {
+            if let Some(unknown) = p.feeds.iter().find(|n| !names.contains(n.as_str())) {
+                return Err(invalid(
+                    "profiles.feeds",
+                    format!("{}: unknown feed {unknown:?}", p.name),
+                ));
+            }
+        }
+        let s = &self.scan;
+        if s.max_bytes == 0
+            || s.max_concurrent == 0
+            || s.buffer_timeout_secs == 0
+            || s.temp_quota_bytes < s.max_bytes
+        {
+            return Err(invalid(
+                "scan",
+                "max_bytes, max_concurrent and buffer_timeout_secs > 0; temp_quota_bytes >= max_bytes",
+            ));
+        }
+        if let Some(c) = &s.clamd {
+            let ok = match c.address.split_once(':') {
+                Some(("unix", path)) => path.starts_with('/'),
+                Some(("tcp", addr)) => {
+                    addr.parse::<SocketAddr>().is_ok_and(|a| a.ip().is_loopback())
+                }
+                _ => false,
+            };
+            if !ok || c.timeout_secs == 0 || !(1024..=1 << 20).contains(&c.chunk_bytes) {
+                return Err(invalid(
+                    "scan.clamd",
+                    "address unix:/path or tcp:<loopback>:port; timeout > 0; chunk 1 KiB..1 MiB",
+                ));
+            }
+        }
+        if s.yara.is_some() && !cfg!(feature = "yara") {
+            return Err(invalid("scan.yara", "this build lacks the `yara` feature (D-54)"));
+        }
+        if !s.hash_blocklist.as_os_str().is_empty() {
+            check_readable_file("scan.hash_blocklist", &s.hash_blocklist)?;
+        }
+        Ok(())
     }
 
     fn validate_categories(&self) -> Result<(), ConfigError> {

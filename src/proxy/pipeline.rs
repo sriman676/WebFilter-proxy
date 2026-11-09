@@ -637,6 +637,38 @@ where
         send_block(client, ev, &d, deps).await; // upstream headers discarded, body never forwarded
         return Ok(Outcome::Done);
     }
+    // Download inspection (D-53): opt-in per profile, 2xx GET, plain HTTP and intercepted HTTPS.
+    if let Some(scanner) = deps.scanner.as_ref().filter(|_| {
+        profile.scan_downloads == Some(true)
+            && head.method == "GET"
+            && (200..300).contains(&resp.status)
+    }) {
+        let prefix = super::scanning::payload_prefix(
+            &mut upstream,
+            &mut up_buf,
+            resp_framing,
+            deps.limits.compat,
+            idle,
+        )
+        .await;
+        if scanner.eligible(&t.path, content_type.as_deref(), &prefix) {
+            let cd = single(&resp.headers, "content-disposition")
+                .map(|v| String::from_utf8_lossy(v).into_owned());
+            ev.download_name = Some(crate::scan::download_name(cd.as_deref(), &t.path));
+            return super::scanning::forward(
+                client,
+                ev,
+                deps,
+                profile,
+                scanner,
+                &resp,
+                resp_framing,
+                upstream,
+                up_buf,
+            )
+            .await;
+        }
+    }
 
     let keep_alive = body_sent
         && client_wants_keep_alive(head)

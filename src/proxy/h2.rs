@@ -25,10 +25,12 @@ use super::pipeline::{
 };
 use super::response::{error_html, page_headers};
 use crate::config::Http2Config;
+use crate::config::ScanMode;
 use crate::filter::Phase;
 use crate::logger::{RequestEvent, SysEvent};
 use crate::normalize::{NormalizedTarget, TargetContext, TargetError, canonicalize};
 use crate::reason::Reason;
+use crate::scan::Verdict;
 
 /// Close a connection with no open streams after this long without input (SPEC 4.16).
 const IDLE: Duration = Duration::from_secs(60);
@@ -378,7 +380,8 @@ async fn exchange(
     let end = body.is_end_stream();
     let (resp_fut, up_send) = sender.send_request(up_req, end).map_err(|_| upstream_err())?;
     let stall = Duration::from_secs(deps.cfg.http2.stall_timeout_secs);
-    let upload = async { if end { Ok(0) } else { pump(body, up_send, stall).await } };
+    let upload =
+        async { if end { Ok(0) } else { pump(body, up_send, stall, None, &mut |_| {}).await } };
     let response =
         timeout(Duration::from_secs(deps.cfg.timeouts.upstream_response_header), resp_fut);
     let (sent, resp) = tokio::join!(upload, response);
@@ -407,24 +410,179 @@ async fn exchange(
         return Ok(());
     }
 
+    let mut rbody = rbody;
+    let mut first = None;
+    // Download inspection (D-53) on intercepted h2 streams.
+    if let Some(scanner) = deps.scanner.as_ref().filter(|_| {
+        profile.scan_downloads == Some(true)
+            && parts.method == http::Method::GET
+            && rparts.status.is_success()
+    }) {
+        if !rbody.is_end_stream() {
+            first = rbody.data().await.transpose().map_err(|_| upstream_err())?;
+        }
+        let prefix = first.as_deref().unwrap_or(&[]);
+        let prefix = prefix.get(..prefix.len().min(super::scanning::PREFIX)).unwrap_or(&[]);
+        if scanner.eligible(&t.path, content_type.as_deref(), prefix) {
+            let cd = rparts
+                .headers
+                .get("content-disposition")
+                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+            ev.download_name = Some(crate::scan::download_name(cd.as_deref(), &t.path));
+            return scan_stream(respond, ev, c, profile, scanner, &rparts, first, rbody).await;
+        }
+    }
+
     let mut out = Response::builder().status(rparts.status).body(()).map_err(|_| upstream_err())?;
     *out.headers_mut() = forward_headers(&rparts.headers);
-    let end = rbody.is_end_stream();
+    let end = rbody.is_end_stream() && first.is_none();
     let down = respond.send_response(out, end).map_err(|_| client_gone())?;
     ev.status = rparts.status.as_u16();
     if !end {
-        ev.bytes_in = pump(rbody, down, stall).await.map_err(|e| {
-            if e == PumpError::Stall {
-                c.guard.trip(Violation::Stall); // a client that stops reading (D-45)
-            }
-            Fail {
-                status: None,
-                reason: Reason::UpstreamError,
-                error: "response body relay failed",
-            }
-        })?;
+        ev.bytes_in =
+            pump(rbody, down, stall, first, &mut |_| {}).await.map_err(|e| relay_fail(c, e))?;
     }
     Ok(())
+}
+
+/// A response-relay failure; a stalled client trips the flood guard (D-45).
+fn relay_fail(c: &Conn, e: PumpError) -> Fail {
+    if e == PumpError::Stall {
+        c.guard.trip(Violation::Stall);
+    }
+    Fail { status: None, reason: Reason::UpstreamError, error: "response body relay failed" }
+}
+
+/// Scan an eligible h2 download: detect tees while relaying, block buffers first (P4).
+#[allow(clippy::too_many_arguments)]
+async fn scan_stream(
+    respond: &mut h2::server::SendResponse<Bytes>,
+    ev: &mut RequestEvent,
+    c: &Conn,
+    profile: &crate::profiles::Profile,
+    scanner: &crate::scan::Scanner,
+    rparts: &http::response::Parts,
+    first: Option<Bytes>,
+    mut rbody: RecvStream,
+) -> Result<(), Fail> {
+    use super::scanning::{decision, known_unscannable, malware_event, note_verdict};
+    let deps = &c.deps;
+    let stall = Duration::from_secs(deps.cfg.http2.stall_timeout_secs);
+    let length = rparts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse().ok());
+    let encoding =
+        rparts.headers.get(http::header::CONTENT_ENCODING).map(|v| v.as_bytes().to_vec());
+    let early = known_unscannable(
+        rparts.status.as_u16(),
+        encoding.as_deref(),
+        length,
+        scanner.cfg.max_bytes,
+    );
+    let mut slot = match early {
+        Some(why) => Err(Verdict::Unscannable(why)),
+        None => scanner.begin().await.map_err(Verdict::Unscannable),
+    };
+    let head = |len: Option<u64>| {
+        let mut out = Response::builder().status(rparts.status).body(()).unwrap_or_default();
+        *out.headers_mut() = forward_headers(&rparts.headers);
+        out.headers_mut().remove(http::header::CONTENT_LENGTH);
+        if let Some(n) = len {
+            out.headers_mut().insert(http::header::CONTENT_LENGTH, n.into());
+        }
+        out
+    };
+    if scanner.cfg.mode == ScanMode::Detect || slot.is_err() {
+        if let (Err(v), ScanMode::Block) = (&slot, scanner.cfg.mode)
+            && let Some(d) = decision(scanner, v, profile)
+        {
+            note_verdict(ev, v, None, 0);
+            note_decision(ev, &d);
+            send_block(respond, ev, &d, deps).await;
+            return Ok(());
+        }
+        let down = respond.send_response(head(length), false).map_err(|_| client_gone())?;
+        ev.status = rparts.status.as_u16();
+        let mut tap = |chunk: &[u8]| {
+            if let Ok(s) = slot.as_mut() {
+                let _ = s.write(chunk);
+            }
+        };
+        ev.bytes_in =
+            pump(rbody, down, stall, first, &mut tap).await.map_err(|e| relay_fail(c, e))?;
+        match slot {
+            Ok(mut s) => {
+                let (v, sha) = scanner.finish(&mut s).await;
+                note_verdict(ev, &v, Some(sha), s.bytes);
+            }
+            Err(v) => note_verdict(ev, &v, None, 0),
+        }
+        malware_event(deps, ev);
+        return Ok(());
+    }
+    // Block mode: buffer within max_bytes and buffer_timeout_secs, scan, then deliver or refuse.
+    let Ok(mut s) = slot else { return Err(client_gone()) };
+    let mut held: Vec<Bytes> = Vec::new();
+    let limit = Duration::from_secs(scanner.cfg.buffer_timeout_secs);
+    let buffered = timeout(limit, async {
+        let mut next = first;
+        loop {
+            let chunk = match next.take() {
+                Some(b) => b,
+                None => match rbody.data().await {
+                    Some(r) => r.map_err(|_| ())?,
+                    None => return Ok(true),
+                },
+            };
+            let _ = rbody.flow_control().release_capacity(chunk.len());
+            if s.write(&chunk).is_err() {
+                held.push(chunk);
+                return Ok(false);
+            }
+        }
+    })
+    .await;
+    let complete = match buffered {
+        Ok(Ok(done)) => done,
+        Ok(Err(())) => return Err(upstream_err_fail()),
+        Err(_) => {
+            s.stop("scan buffer timeout");
+            false
+        }
+    };
+    let (v, sha) = scanner.finish(&mut s).await;
+    note_verdict(ev, &v, Some(sha), s.bytes);
+    malware_event(deps, ev);
+    if let Some(d) = decision(scanner, &v, profile)
+        && d.is_block()
+    {
+        note_decision(ev, &d);
+        send_block(respond, ev, &d, deps).await;
+        return Ok(());
+    }
+    let mut down = respond
+        .send_response(head(complete.then_some(s.bytes)), false)
+        .map_err(|_| client_gone())?;
+    ev.status = rparts.status.as_u16();
+    let mut sent = 0u64;
+    let chunks = s.chunks().map_err(|_| client_gone())?;
+    for chunk in chunks.map(|r| r.map(Bytes::from)).chain(held.into_iter().map(Ok)) {
+        let chunk = chunk.map_err(|_| client_gone())?;
+        sent += chunk.len() as u64;
+        send_chunk(&mut down, chunk, stall).await.map_err(|e| relay_fail(c, e))?;
+    }
+    if complete {
+        down.send_data(Bytes::new(), true).map_err(|_| client_gone())?;
+    } else {
+        sent += pump(rbody, down, stall, None, &mut |_| {}).await.map_err(|e| relay_fail(c, e))?;
+    }
+    ev.bytes_in = sent;
+    Ok(())
+}
+
+fn upstream_err_fail() -> Fail {
+    fail(502, Reason::UpstreamError, "upstream h2 error")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -435,29 +593,50 @@ enum PumpError {
     Closed,
 }
 
+/// Send one chunk as the receiver's flow-control credit allows.
+async fn send_chunk(
+    to: &mut SendStream<Bytes>,
+    mut chunk: Bytes,
+    stall: Duration,
+) -> Result<(), PumpError> {
+    while !chunk.is_empty() {
+        to.reserve_capacity(chunk.len());
+        let cap = timeout(stall, poll_fn(|cx| to.poll_capacity(cx)))
+            .await
+            .map_err(|_| PumpError::Stall)?
+            .ok_or(PumpError::Closed)?
+            .map_err(|_| PumpError::Closed)?;
+        let piece = chunk.split_to(cap.min(chunk.len()));
+        if !piece.is_empty() {
+            to.send_data(piece, false).map_err(|_| PumpError::Closed)?;
+        }
+    }
+    Ok(())
+}
+
 /// Relay DATA (and trailers) honoring the receiver's flow control: input credit is released
 /// only after the bytes were handed to the other side, so memory stays bounded by the windows.
+/// `first` is a chunk already read from `from`; `tap` sees every chunk (download scanning).
 async fn pump(
     mut from: RecvStream,
     mut to: SendStream<Bytes>,
     stall: Duration,
+    first: Option<Bytes>,
+    tap: &mut (dyn FnMut(&[u8]) + Send),
 ) -> Result<u64, PumpError> {
     let mut total = 0u64;
-    while let Some(chunk) = from.data().await {
-        let mut chunk = chunk.map_err(|_| PumpError::Closed)?;
+    let mut next = first;
+    loop {
+        let chunk = match next.take() {
+            Some(b) => b,
+            None => match from.data().await {
+                Some(r) => r.map_err(|_| PumpError::Closed)?,
+                None => break,
+            },
+        };
         let len = chunk.len();
-        while !chunk.is_empty() {
-            to.reserve_capacity(chunk.len());
-            let cap = timeout(stall, poll_fn(|cx| to.poll_capacity(cx)))
-                .await
-                .map_err(|_| PumpError::Stall)?
-                .ok_or(PumpError::Closed)?
-                .map_err(|_| PumpError::Closed)?;
-            let piece = chunk.split_to(cap.min(chunk.len()));
-            if !piece.is_empty() {
-                to.send_data(piece, false).map_err(|_| PumpError::Closed)?;
-            }
-        }
+        tap(&chunk);
+        send_chunk(&mut to, chunk, stall).await?;
         total += len as u64;
         from.flow_control().release_capacity(len).map_err(|_| PumpError::Closed)?;
     }

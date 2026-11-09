@@ -9,6 +9,7 @@ pub mod http1;
 pub mod io;
 pub mod pipeline;
 pub mod response;
+pub mod scanning;
 pub mod transparent;
 
 use std::collections::HashMap;
@@ -196,6 +197,10 @@ pub struct ProxyDeps {
     pub policies: arc_swap::ArcSwap<PolicySet>,
     /// Per-client limits (D-51).
     pub limiter: Arc<Limiter>,
+    /// Threat feeds (D-52).
+    pub feeds: Arc<crate::feeds::FeedManager>,
+    /// Download scanning when `[scan] enabled` (D-53).
+    pub scanner: Option<Arc<crate::scan::Scanner>>,
     auth: ProxyAuth,
     per_ip: Mutex<HashMap<IpAddr, usize>>,
     shutdown: watch::Receiver<bool>,
@@ -232,7 +237,11 @@ impl ProxyDeps {
 
     fn evaluate(&self, t: &NormalizedTarget, phase: Phase<'_>, profile: &Profile) -> Decision {
         let now = time::OffsetDateTime::now_utc();
-        evaluate_profile(t, phase, &self.lists.snapshot(), profile, now)
+        let d = evaluate_profile(t, phase, &self.lists.snapshot(), profile, now);
+        if d.reason != Reason::None || profile.feeds.is_empty() {
+            return d; // an allowlist hit also bypasses feeds (list rules only, P1)
+        }
+        self.feeds.check(t, phase, &profile.feeds, profile.mode).unwrap_or(d)
     }
 
     /// Authenticate when users exist (per request, D-50); returns the user name.
@@ -383,6 +392,22 @@ pub async fn start_with(
     let resolver = resolver.or_else(crate::policy::test_hosts_resolver);
     let (tx, rx) = watch::channel(false);
     let policies = PolicySet::build(&cfg).map_err(invalid)?;
+    let scanner = if cfg.scan.enabled {
+        Some(Arc::new(crate::scan::Scanner::new(cfg.scan.clone()).map_err(invalid)?))
+    } else {
+        None
+    };
+    let feeds = Arc::new(crate::feeds::FeedManager::new(
+        cfg.feeds.clone(),
+        cfg.feeds_global.dir.clone(),
+        cfg.feeds_global.protected_domains.clone(),
+        Some(crate::feeds::Fetcher {
+            tls: Arc::clone(&upstream_tls),
+            resolver: resolver.clone().unwrap_or_else(|| Arc::new(SystemResolver)),
+            policy: DestPolicy::new(!feed_loopback_allowed(), Vec::new()),
+        }),
+        Some(sys.clone()),
+    ));
     let mode = if cfg.mode == Mode::Monitor { "monitor" } else { "enforce" };
     let deps = Arc::new(ProxyDeps {
         policy: DestPolicy::new(cfg.destination.deny_private_ranges, own),
@@ -399,6 +424,8 @@ pub async fn start_with(
         upstream_tls,
         policies: arc_swap::ArcSwap::from_pointee(policies),
         limiter: Limiter::new(Arc::new(SystemClock), crate::limiter::MAX_KEYS),
+        feeds: Arc::clone(&feeds),
+        scanner,
         auth: ProxyAuth::new(),
         per_ip: Mutex::new(HashMap::new()),
         shutdown: rx,
@@ -419,6 +446,7 @@ pub async fn start_with(
         lists.spawn_watcher(Duration::from_secs(deps.cfg.blocklists.reload_interval_secs), sys);
     let stats_task = tokio::spawn(stats_loop(Arc::clone(&deps)));
     let policy_task = tokio::spawn(policy_watch(Arc::clone(&deps)));
+    let feed_tasks = feeds.spawn();
     let mut accept =
         vec![tokio::spawn(accept_loop(listener, Arc::clone(&deps), Listener::Explicit))];
     if let Some((http, tls)) = transparent {
@@ -431,8 +459,14 @@ pub async fn start_with(
         transparent_addrs,
         shutdown: tx,
         accept,
-        background: vec![watcher, stats_task, policy_task],
+        background: [watcher, stats_task, policy_task].into_iter().chain(feed_tasks).collect(),
     })
+}
+
+/// Feed hosts must be public (P3); only `insecure-test` builds may allow a loopback test feed.
+fn feed_loopback_allowed() -> bool {
+    cfg!(feature = "insecure-test")
+        && std::env::var("WEBFILTER_TEST_FEED_ALLOW_LOOPBACK").is_ok_and(|v| v == "1")
 }
 
 fn extra_roots(cfg: &Config) -> Vec<std::path::PathBuf> {

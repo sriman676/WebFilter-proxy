@@ -1,7 +1,7 @@
 //! Load generator and fast origin for `just load` (TEST_PLAN L-01..L-05, D-34). Offline, no
 //! external tools. Lab/loopback use only.
 //!
-//!   loadgen origin [--tls CA_OUT]                 print the port, serve until killed
+//!   loadgen origin [--tls CA_OUT [--h2]]          print the port, serve until killed (--h2: ALPN h2)
 //!   loadgen run --url URL [--proxy ADDR] [--ca PEM] [--conns N] [--secs S] [--rate R]
 //!   loadgen hold --proxy ADDR --url URL --conns N --secs S   (idle keep-alive connections)
 //!
@@ -62,6 +62,27 @@ async fn serve_origin<S: AsyncRead + AsyncWrite + Unpin>(mut s: S) {
     }
 }
 
+/// h2 origin (h2spec target behind the proxy): every stream gets a 200 with a small body.
+async fn serve_h2<S: AsyncRead + AsyncWrite + Unpin>(s: S) {
+    let Ok(mut conn) = h2::server::handshake(s).await else { return };
+    while let Some(Ok((req, mut respond))) = conn.accept().await {
+        tokio::spawn(async move {
+            let mut body = req.into_body();
+            while let Some(Ok(c)) = body.data().await {
+                let _ = body.flow_control().release_capacity(c.len());
+            }
+            let resp = http::Response::builder()
+                .status(200)
+                .header("content-type", "text/html")
+                .body(())
+                .unwrap();
+            if let Ok(mut s) = respond.send_response(resp, false) {
+                let _ = s.send_data(bytes::Bytes::from_static(BODY), true);
+            }
+        });
+    }
+}
+
 async fn origin(args: &[String]) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tls = arg(args, "--tls").map(|ca_out| {
@@ -80,7 +101,11 @@ async fn origin(args: &[String]) {
                 PrivateKeyDer::Pkcs8(key.serialize_der().into()),
             )
             .unwrap();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = if args.iter().any(|a| a == "--h2") {
+            vec![b"h2".to_vec()]
+        } else {
+            vec![b"http/1.1".to_vec()]
+        };
         tokio_rustls::TlsAcceptor::from(Arc::new(config))
     });
     println!("{}", listener.local_addr().unwrap().port());
@@ -92,7 +117,11 @@ async fn origin(args: &[String]) {
             match tls {
                 Some(a) => {
                     if let Ok(t) = a.accept(s).await {
-                        serve_origin(t).await;
+                        if t.get_ref().1.alpn_protocol() == Some(b"h2") {
+                            serve_h2(t).await;
+                        } else {
+                            serve_origin(t).await;
+                        }
                     }
                 }
                 None => serve_origin(s).await,

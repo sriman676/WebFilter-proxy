@@ -67,6 +67,7 @@ RUST_PIN=1.99.0
 | cargo tools (nextest, llvm-cov, deny, audit, fuzz, geiger, cyclonedx) | install with `--locked`; record versions | fill in Phase 0 |
 | clamav container image | exact tag chosen in Phase 10 and recorded (never `latest`) | fill in Phase 10 |
 | promtool, headless browser | latest release at Phase 11; record versions | fill in Phase 11 |
+| ClamAV container | `clamav/clamav@sha256:6d87c712e3391e13c1ba6e05dfb074d4b1ddb5a6834b23bb9da990d2a4ef042a` (scan/docker-compose.yml, `just scan-e2e`) | Phase 10 |
 | SIEM container images | `opensearchproject/opensearch:2.19.1`, `opensearch-dashboards:2.19.1`, `fluent/fluent-bit:3.1.9` (siem/opensearch/docker-compose.yml) | Phase 5 |
 
 ### Expected crate majors (verify; may have changed)

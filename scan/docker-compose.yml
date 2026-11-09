@@ -1,0 +1,11 @@
+# ClamAV daemon for `just scan-e2e` (E-63..E-65, D-54). Pinned by digest (ENVIRONMENT.md); loopback only.
+# First start downloads signatures (freshclam) and can take a few minutes.
+name: webfilter-scan
+services:
+  clamd:
+    image: clamav/clamav@sha256:6d87c712e3391e13c1ba6e05dfb074d4b1ddb5a6834b23bb9da990d2a4ef042a
+    container_name: webfilter-clamd
+    ports: ["127.0.0.1:3310:3310"]
+    volumes: [clamdb:/var/lib/clamav]
+volumes:
+  clamdb: {}
