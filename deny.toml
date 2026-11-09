@@ -6,6 +6,11 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
+# A-45: rsa rc via yara-x (optional `yara` feature, public-key verification only); see .cargo/audit.toml.
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "yara-x only verifies signatures with public keys; optional feature" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained (no vulnerability); only via yara-x, optional feature" },
+]
 
 [licenses]
 version = 2

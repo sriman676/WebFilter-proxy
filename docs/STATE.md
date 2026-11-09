@@ -1,12 +1,12 @@
 # Project State (update at every gate; first file read when resuming)
-Current phase: 13 (not started)
+Current phase: 14 (not started)
 Milestone tags: m1-complete, m2-complete
-Last green commit: phase-12-complete
+Last green commit: phase-13-complete
 Open findings: none Critical/High. Deferred: PF-0-14 (insecure-test sentinel)
 Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`).
 User decisions taken up front: A-24..A-29. Flow: build+test every phase, tag, continue; ALL pentesting at the end,
 then full-codebase redundancy cleanup, then merge to main + v1.1.0 (no push).
-Next action: execute docs/phases/PHASE-13.md. Then 14, speed pass, audit, stress test (A-40), pentest, brag video (A-41), merge + v1.1.0. User: rerun netns e2e, install ffmpeg.
+Next action: execute docs/phases/PHASE-14.md (WebExtension + WASM rule plugins). Then speed pass, audit, stress test (A-40), consolidated pentest (incl. PT-13.1/13.6/13.7, m3/m4/m5 tags), brag video (A-41), merge + v1.1.0. User: rerun netns e2e, install ffmpeg.
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
@@ -23,4 +23,4 @@ Next action: execute docs/phases/PHASE-13.md. Then 14, speed pass, audit, stress
 | 10 | done | 2026-11-09 | phase-10-complete | 253 tests (+YARA), cov 87.9%; real ClamAV, siem-e2e, h2spec PASS; netns rerun pending (E-49 diag, PT-7.8 fixed) |
 | 11 | done | 2026-11-09 | phase-11-complete | 262 tests, cov 84.7%; promtool PASS; dashboard checked in Chrome; PF-11-01 fixed; pentest deferred (A-29) |
 | 12 | done | 2026-11-10 | phase-12-complete | 278 tests, cov 85.3%; F-19..F-22 fuzzed (PF-12-02..04 fixed); PF-12-01 fixed; E-80 browser check and pentest deferred (A-29) |
-| 13 | todo | | | |
+| 13 | done | 2026-11-10 | phase-13-complete | E-83 + upgrade + h2 limits tests; L-06 PASS (-2.1 %); E-80 PASS in Chromium; deny/audit clean (A-45); pentest deferred (A-29) |

@@ -13,7 +13,9 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{Lab, Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config, status};
+use common::{
+    Lab, Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config, eicar, fake_clamd, status,
+};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use webfilter::config::{FeedConfig, FeedFormat};
@@ -23,13 +25,6 @@ use webfilter::feeds::{
 use webfilter::scan::{download_name, magic, parse_clamd_reply, sanitize_signature};
 
 const W: Duration = Duration::from_secs(10);
-
-/// The EICAR test string, assembled at runtime so no file in the repo carries it (D-53).
-fn eicar() -> Vec<u8> {
-    let a = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$";
-    let b = "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
-    format!("{a}{b}").into_bytes()
-}
 
 fn protect() -> Vec<String> {
     vec!["admin.example".into()]
@@ -371,43 +366,6 @@ fn clamd_reply_signature_name_and_magic() {
 }
 
 // ------------------------------------------------------------------------------------ scanning e2e
-
-/// A fake clamd: INSTREAM framing checked, FOUND when the stream contains EICAR.
-async fn fake_clamd() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        while let Ok((mut s, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let mut cmd = [0u8; 10];
-                if s.read_exact(&mut cmd).await.is_err() || &cmd != b"zINSTREAM\0" {
-                    return;
-                }
-                let mut data = Vec::new();
-                loop {
-                    let mut len = [0u8; 4];
-                    if s.read_exact(&mut len).await.is_err() {
-                        return;
-                    }
-                    let n = u32::from_be_bytes(len) as usize;
-                    if n == 0 {
-                        break;
-                    }
-                    let mut chunk = vec![0u8; n];
-                    if s.read_exact(&mut chunk).await.is_err() {
-                        return;
-                    }
-                    data.extend_from_slice(&chunk);
-                }
-                let found = data.windows(eicar().len()).any(|w| w == eicar().as_slice());
-                let reply: &[u8] =
-                    if found { b"stream: Eicar-Test-Signature FOUND\0" } else { b"stream: OK\0" };
-                let _ = s.write_all(reply).await;
-            });
-        }
-    });
-    port
-}
 
 fn clean_bytes() -> Vec<u8> {
     let mut v = b"MZ".to_vec();

@@ -1,0 +1,6 @@
+# cargo-audit configuration (PT-13.5, A-45).
+[advisories]
+# rsa 0.10.0-rc.19 (Marvin timing attack on private-key operations) is pulled only by yara-x 1.23 behind the
+# optional, default-off `yara` feature; yara-x uses it to verify Authenticode signatures with public keys, so
+# no secret key is ever processed. yara-x 1.23 does not build with rsa 0.10.0. Revisit on every yara-x release.
+ignore = ["RUSTSEC-2023-0071"]

@@ -437,3 +437,50 @@ pub fn client_config(ca_pem: &str, alpn: &[&[u8]]) -> Arc<rustls::ClientConfig> 
     config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     Arc::new(config)
 }
+
+// ---------------------------------------------------------------------------------------------
+// Scanning
+
+/// The EICAR test string, assembled at runtime so no file in the repo carries it (D-53).
+pub fn eicar() -> Vec<u8> {
+    let a = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$";
+    let b = "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    format!("{a}{b}").into_bytes()
+}
+
+/// A fake clamd: INSTREAM framing checked, FOUND when the stream contains EICAR.
+pub async fn fake_clamd() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut cmd = [0u8; 10];
+                if s.read_exact(&mut cmd).await.is_err() || &cmd != b"zINSTREAM\0" {
+                    return;
+                }
+                let mut data = Vec::new();
+                loop {
+                    let mut len = [0u8; 4];
+                    if s.read_exact(&mut len).await.is_err() {
+                        return;
+                    }
+                    let n = u32::from_be_bytes(len) as usize;
+                    if n == 0 {
+                        break;
+                    }
+                    let mut chunk = vec![0u8; n];
+                    if s.read_exact(&mut chunk).await.is_err() {
+                        return;
+                    }
+                    data.extend_from_slice(&chunk);
+                }
+                let found = data.windows(eicar().len()).any(|w| w == eicar().as_slice());
+                let reply: &[u8] =
+                    if found { b"stream: Eicar-Test-Signature FOUND\0" } else { b"stream: OK\0" };
+                let _ = s.write_all(reply).await;
+            });
+        }
+    });
+    port
+}

@@ -60,6 +60,7 @@ release:
 # --- supply chain -----------------------------------------------------------------------
 audit:
     cargo deny check
+    cargo deny --all-features check
     cargo audit
     cargo geiger --all-features
 
@@ -107,14 +108,17 @@ pentest-p11:
 pentest-p12:
     scripts/pentest_p12.sh
 pentest-p13:
-    @echo "TODO: pentest-p13 lands in Phase 13 (PENTEST_PLAN_EXT PT-13.x)" >&2; exit 1
+    scripts/pentest_p13.sh
 
 # --- end-to-end and external suites (later phases) --------------------------------------
 # Offline end-to-end suites that drive the real proxy/client (E-xx; E-28/E-41/E-44..50 have own recipes).
 e2e:
-    cargo nextest run --locked --features insecure-test --test client_e2e --test cli_check_config --test proxy_integration --test proxy_security --test tls_tests --test h2_tests --test transparent_tests --test observability_tests
+    cargo nextest run --locked --features insecure-test --test client_e2e --test cli_check_config --test proxy_integration --test proxy_security --test tls_tests --test h2_tests --test transparent_tests --test observability_tests --test policy_profile_tests --test feeds_scan_tests --test admin_tests --test client_ext_tests --test interaction_tests
 load:
     scripts/load.sh
+# L-06 / PT-13.4: overhead with profiles, limits and metrics on vs plain.
+load-features:
+    scripts/load_features.sh
 # Offline detection/template checks (TEST_PLAN section 8 fallback) and the live OpenSearch run (A-14).
 siem-test:
     python3 scripts/siem/siem_test.py
@@ -134,6 +138,6 @@ promtool:
 ui-lint:
     python3 scripts/ui_lint.py
 ui-e2e:
-    @echo "TODO: ui-e2e lands in Phase 11 (headless browser, E-72, E-80)" >&2; exit 1
+    python3 scripts/ui_e2e.py
 acceptance:
     scripts/acceptance.sh
