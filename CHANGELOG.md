@@ -2,6 +2,18 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-12-complete] - 2026-11-09 - Phase 12: client batches, retries, resume, snapshots, crawl (pentest in the final run, A-29)
+### Added
+- `--input-file` (with `-` for stdin), `--retries`/`--retry-max-delay` (Retry-After aware, never retrying blocks,
+  TLS or usage errors), `--manifest` JSONL with a lock file and verified `--resume`, `--resume-partial` (If-Range).
+- `--snapshot` (lol_html sanitizer, same-site assets with caps and media-type checks, CSP meta, report),
+  `--snapshot-allow-scripts`, `--snapshot-extra-host`.
+- `--crawl-depth`, `--max-pages`, `--crawl-subdomains`, `--crawl-delay-ms`, `--crawl-timeout`: BFS with an RFC 9309
+  robots.txt parser, politeness, trap caps, link rewriting and `index.html`.
+- `--json` fields `attempts`, `snapshot_report`, `crawl_depth`; summary line; fuzz targets F-19..F-22; `just pentest-p12`.
+### Fixed
+- PF-12-01 manifest after a crash; PF-12-02..04 snapshot sanitizer edge cases found by fuzzing.
+
 ## [phase-11-complete] - 2026-11-09 - Phase 11: operations, admin, dashboard, access requests (pentest in the final run, A-29)
 ### Added
 - Admin listener (loopback, off by default): Host allowlist on every route, Bearer token with lockout, Origin

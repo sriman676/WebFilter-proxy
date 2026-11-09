@@ -129,6 +129,8 @@ impl Reply {
 type Handler = Arc<dyn Fn(&[u8]) -> Reply + Send + Sync>;
 
 /// A recording HTTP origin on 127.0.0.1:0. Every received request (head + body) is recorded.
+/// The handler runs twice per request (once for the interim reply), so stateful handlers count
+/// requests as calls / 2.
 pub struct Origin {
     pub addr: SocketAddr,
     pub seen: Arc<Mutex<Vec<Vec<u8>>>>,
