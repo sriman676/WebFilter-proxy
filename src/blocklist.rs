@@ -531,6 +531,17 @@ pub struct BlocklistHandle {
     cfg: BlocklistConfig,
     current: ArcSwap<Blocklists>,
     stamp: Mutex<Stamp>,
+    overrides: ArcSwap<BTreeMap<String, CategoryOverride>>,
+}
+
+/// A dashboard override of one category (A-30); `None` keeps the config value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CategoryOverride {
+    /// Enable or disable the category.
+    pub enabled: Option<bool>,
+    /// Replace its schedule.
+    pub active: Option<Vec<String>>,
 }
 
 impl BlocklistHandle {
@@ -542,6 +553,7 @@ impl BlocklistHandle {
             cfg: cfg.clone(),
             current: ArcSwap::from_pointee(lists),
             stamp: Mutex::new(stamp),
+            overrides: ArcSwap::from_pointee(BTreeMap::new()),
         };
         Ok((handle, report))
     }
@@ -557,13 +569,41 @@ impl BlocklistHandle {
             .collect()
     }
 
+    /// The list configuration with category overrides applied.
+    pub fn config(&self) -> BlocklistConfig {
+        let mut c = self.cfg.clone();
+        let ov = self.overrides.load();
+        for cat in &mut c.categories {
+            if let Some(o) = ov.get(&cat.name) {
+                if let Some(e) = o.enabled {
+                    cat.enabled = e;
+                }
+                if let Some(a) = &o.active {
+                    cat.active.clone_from(a);
+                }
+            }
+        }
+        c
+    }
+
+    /// Replace the category overrides and reload; on failure the previous overrides and lists
+    /// stay active.
+    pub fn set_category_overrides(&self, map: BTreeMap<String, CategoryOverride>) -> ReloadOutcome {
+        let previous = self.overrides.swap(Arc::new(map));
+        let outcome = self.reload();
+        if matches!(outcome, ReloadOutcome::Failed(_)) {
+            self.overrides.store(previous);
+        }
+        outcome
+    }
+
     /// Reload now (SIGHUP); on failure the previous lists stay active.
     pub fn reload(&self) -> ReloadOutcome {
         // Holding the stamp lock for the whole load serializes reloads (SIGHUP vs watcher), so an
         // older load can never overwrite a newer one. A failed load is not retried until changed.
         let mut stamp = self.stamp.lock().unwrap_or_else(|e| e.into_inner());
         *stamp = Self::stamp_of(&self.cfg);
-        match Blocklists::load(&self.cfg) {
+        match Blocklists::load(&self.config()) {
             Ok((lists, report)) => {
                 self.current.store(Arc::new(lists));
                 ReloadOutcome::Reloaded(report)

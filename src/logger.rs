@@ -27,6 +27,10 @@ pub const REQUEST_FILE: &str = "webfilter.jsonl";
 pub const SYSTEM_FILE: &str = "webfilter_system.jsonl";
 /// Stats log file name.
 pub const STATS_FILE: &str = "webfilter_stats.jsonl";
+/// Admin audit log (SPEC_EXT_OPS O1).
+pub const ADMIN_FILE: &str = "webfilter_admin.jsonl";
+/// Access-request events for the SIEM (O6; no justification text).
+pub const ACCESS_FILE: &str = "webfilter_access.jsonl";
 /// How often dropped events are reported (D-17).
 pub const DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -273,6 +277,8 @@ enum Target {
     Requests = 0,
     System = 1,
     Stats = 2,
+    Admin = 3,
+    Access = 4,
 }
 
 enum Msg {
@@ -353,6 +359,26 @@ impl EventLogger {
         if let Ok(line) = serde_json::to_string(s) {
             self.sender.send(Target::Stats, line);
         }
+    }
+
+    /// Append an admin audit record (`timestamp` and `event_type` added; strings cleaned).
+    pub fn admin(&self, actor: &str, remote: &str, action: &str, target: &str, result: &str) {
+        let line = json!({
+            "timestamp": now_timestamp(), "event_type": "admin", "actor": clean(actor, 64),
+            "remote_addr": clean(remote, 64), "action": clean(action, 64), "target": clean(target, 256),
+            "result": clean(result, 64),
+        });
+        self.sender.send(Target::Admin, line.to_string());
+    }
+
+    /// Append an access-request record (ids, host, reason, status; never the justification text).
+    pub fn access(&self, record: serde_json::Value) {
+        let mut v = clean_value(record);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("timestamp".into(), json!(now_timestamp()));
+            o.insert("event_type".into(), json!("access_request"));
+        }
+        self.sender.send(Target::Access, v.to_string());
     }
 
     /// Handle for system events.
@@ -451,7 +477,7 @@ impl RotatingFile {
 }
 
 struct Writer {
-    files: [RotatingFile; 3],
+    files: [RotatingFile; 5],
     dropped: Arc<AtomicU64>,
     reported: u64,
     write_errors: u64,
@@ -461,7 +487,13 @@ impl Writer {
     fn new(dir: &Path, max: u64, backups: u32, dropped: Arc<AtomicU64>) -> Self {
         let file = |name| RotatingFile { path: dir.join(name), file: None, size: 0, max, backups };
         Self {
-            files: [file(REQUEST_FILE), file(SYSTEM_FILE), file(STATS_FILE)],
+            files: [
+                file(REQUEST_FILE),
+                file(SYSTEM_FILE),
+                file(STATS_FILE),
+                file(ADMIN_FILE),
+                file(ACCESS_FILE),
+            ],
             dropped,
             reported: 0,
             write_errors: 0,
