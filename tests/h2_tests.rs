@@ -323,6 +323,35 @@ async fn e39_concurrent_streams_decided_independently() {
     assert!(seen.iter().all(|(proto, p)| proto == "h2" && p.starts_with("/ok/")));
 }
 
+/// E-83 (h2 x profiles x rate limits): every stream is admitted like an HTTP/1 request.
+#[tokio::test]
+async fn e83_h2_streams_share_profile_limits() {
+    let profile = "[[profiles]]\nname = \"default\"\nextra_blocked_domains = [\"other.test\"]\n\
+[profiles.rate]\nrequests_per_sec = 1\nburst = 5\n";
+    let mut l = lab(profile, &[], BOTH).await;
+    let send = h2_client(&l, None).await;
+    let port = l.origin.port;
+    let mut statuses = Vec::new();
+    for i in 0..12 {
+        let (st, headers, _) = fetch(&send, get(port, &format!("/ok/{i}"))).await.unwrap();
+        if st == 429 {
+            assert!(headers.contains_key("retry-after"));
+        }
+        statuses.push(st);
+    }
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        4,
+        "burst 5 = CONNECT + 4 streams: {statuses:?}"
+    );
+    assert_eq!(statuses.iter().filter(|s| **s == 429).count(), 8, "{statuses:?}");
+    drop(send);
+    l.proxy.stop().await;
+    assert_eq!(l.origin.seen().len(), 4, "limited streams never reach the origin");
+    let lines = l.proxy.log_lines();
+    assert!(lines.iter().any(|v| v["reason"] == "rate_limited" && v["http_version"] == "2"));
+}
+
 #[tokio::test]
 async fn e40_parallel_downloads_flow_control_intact() {
     let mut l = lab("", &[], BOTH).await;

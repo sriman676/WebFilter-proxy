@@ -2,6 +2,16 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-13-complete] - 2026-11-10 - Phase 13: final v1.1 regression (pentest in the final run, A-29)
+### Added
+- `tests/interaction_tests.rs` (E-83 feature interactions, PT-13.3 upgrade path) and an h2 x limits test.
+- `just load-features` (L-06: 2.1 % max-throughput overhead with profiles, limits and metrics on).
+- `just ui-e2e` (E-80: snapshot opened offline in headless Chromium, verified by screenshot pixels).
+- `just pentest-p13`; `just acceptance` runs the v1.1 steps 18-24; `just e2e` covers the v1.1 suites.
+### Changed
+- `just audit` also checks the all-features dependency graph; two yara-x-only advisories accepted with
+  reasons (A-45). Shared test helpers `eicar()` / `fake_clamd()` moved to `tests/common`.
+
 ## [phase-12-complete] - 2026-11-09 - Phase 12: client batches, retries, resume, snapshots, crawl (pentest in the final run, A-29)
 ### Added
 - `--input-file` (with `-` for stdin), `--retries`/`--retry-max-delay` (Retry-After aware, never retrying blocks,
