@@ -15,7 +15,7 @@ const DEFAULT_TEMPLATE: &str = "<!doctype html><html><head><meta charset=\"utf-8
 <style>body{font-family:sans-serif;max-width:40em;margin:4em auto;color:#222}code{background:#eee;padding:0 .3em}</style>\
 </head><body><h1>Access blocked</h1><p>The request to <code>{host}</code> was blocked by the web filter.</p>\
 <p>Reason: <code>{reason}</code><br>Rule: <code>{rule_id}</code><br>Category: <code>{category}</code></p>\
-<p>Event id: <code>{event_id}</code> ({timestamp})</p></body></html>";
+<p>Event id: <code>{event_id}</code> ({timestamp})</p>{request_form}</body></html>";
 
 /// HTML-escape for text and attribute contexts.
 pub fn html_escape(s: &str) -> String {
@@ -60,6 +60,60 @@ pub struct BlockInfo<'a> {
     pub event_id: &'a str,
     /// Event timestamp.
     pub timestamp: &'a str,
+    /// Access-request form (SPEC_EXT_OPS O6), `{request_form}` in the template.
+    pub review: Review,
+}
+
+/// What the block page offers for review.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Review {
+    /// Access requests are off for this client: nothing is shown.
+    #[default]
+    Off,
+    /// The reason is not eligible (feeds, malware, safety policy...).
+    NotReviewable,
+    /// The form posting to the reserved virtual host.
+    Form {
+        /// `<scheme>://webfilter.local/request`.
+        action: String,
+        /// HMAC CSRF token.
+        csrf: String,
+    },
+}
+
+impl Review {
+    /// The form HTML; every value escaped.
+    fn html(&self, event_id: &str) -> String {
+        match self {
+            Review::Off => String::new(),
+            Review::NotReviewable => "<p>This block cannot be reviewed.</p>".into(),
+            Review::Form { action, csrf } => format!(
+                "<form method=\"post\" action=\"{}\"><h2>Need this page?</h2>\
+<input type=\"hidden\" name=\"event_id\" value=\"{}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\">\
+<p><label>Why do you need it?<br><textarea name=\"justification\" maxlength=\"500\" rows=\"4\" cols=\"50\" required></textarea></label></p>\
+<p><label>Contact (optional)<br><input name=\"contact\" maxlength=\"100\"></label></p>\
+<button type=\"submit\">Request access</button></form>",
+                html_escape(action),
+                html_escape(event_id),
+                html_escape(csrf)
+            ),
+        }
+    }
+
+    /// The extra CSP header that lets the form post (form-action does not fall back to
+    /// default-src; both policies are enforced together).
+    pub fn csp(&self) -> Option<(&'static str, String)> {
+        match self {
+            Review::Form { action, .. } => {
+                let origin = action.rsplit_once('/').map_or(action.as_str(), |(o, _)| o);
+                Some((
+                    "content-security-policy",
+                    format!("default-src 'none'; style-src 'unsafe-inline'; form-action {origin}"),
+                ))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The block page: built-in or an operator template with `{placeholders}`.
@@ -104,6 +158,11 @@ impl BlockPage {
         while let Some(start) = rest.find('{') {
             out.push_str(rest.get(..start).unwrap_or(""));
             let after = rest.get(start + 1..).unwrap_or("");
+            if let Some(tail) = after.strip_prefix("request_form}") {
+                out.push_str(&info.review.html(info.event_id)); // built from escaped values
+                rest = tail;
+                continue;
+            }
             match after.find('}').and_then(|end| Some((end, value(after.get(..end)?)?))) {
                 Some((end, v)) => {
                     out.push_str(&html_escape(&v));
@@ -123,10 +182,15 @@ impl BlockPage {
 /// Standard reason phrase.
 pub fn status_text(status: u16) -> &'static str {
     match status {
+        200 => "OK",
+        201 => "Created",
         400 => "Bad Request",
         403 => "Forbidden",
         405 => "Method Not Allowed",
+        404 => "Not Found",
         407 => "Proxy Authentication Required",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         414 => "URI Too Long",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
@@ -142,7 +206,11 @@ pub fn status_text(status: u16) -> &'static str {
 
 /// The SPEC 4.7 safety headers of every proxy-generated page, HTTP/1 and HTTP/2 (H11).
 pub fn page_headers(status: u16, reason: Reason, event_id: &str) -> [(&'static str, String); 7] {
-    let action = if status == 403 { "blocked" } else { "error" };
+    let action = match status {
+        403 => "blocked",
+        s if s < 400 => "info",
+        _ => "error",
+    };
     [
         ("content-type", "text/html; charset=utf-8".into()),
         ("x-webfilter-action", action.into()),

@@ -28,6 +28,32 @@ pub fn client_id(peer: IpAddr, user: Option<&str>) -> String {
     }
 }
 
+/// Dashboard settings (A-30): stored in `state/settings.json` with versions; applied on top of
+/// the config file. Only mode, extra allowlist entries and category on/off/schedule; TLS,
+/// destination policy, ports and auth stay file-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Settings {
+    /// Global content-rule mode.
+    pub mode: Option<Mode>,
+    /// Added to `rules.allow_domains`.
+    pub allow_domains: Vec<String>,
+    /// Category overrides.
+    pub categories: std::collections::BTreeMap<String, crate::blocklist::CategoryOverride>,
+}
+
+impl Settings {
+    /// `cfg` with these settings applied (profiles and mode).
+    pub fn apply(&self, cfg: &Config) -> Config {
+        let mut c = cfg.clone();
+        if let Some(m) = self.mode {
+            c.mode = m;
+        }
+        c.rules.allow_domains.extend(self.allow_domains.iter().cloned());
+        c
+    }
+}
+
 /// A compiled profile.
 #[derive(Debug)]
 pub struct Profile {

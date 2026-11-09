@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebFilter Dashboard</title>
+<link rel="stylesheet" href="/ui/style.css">
+<script src="/ui/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true"></span><h1>WebFilter</h1><span id="mode-badge" class="badge">-</span></div>
+  <form id="login" class="login" autocomplete="off">
+    <label for="token" class="sr">Admin token</label>
+    <input id="token" type="password" placeholder="Admin token (kept in memory only)" autocomplete="off">
+    <button type="submit">Connect</button>
+  </form>
+  <span id="status" class="status" role="status">Not connected</span>
+</header>
+<nav id="tabs" class="tabs" aria-label="Sections">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="events">Live events</button>
+  <button data-tab="blocked">Top blocked</button>
+  <button data-tab="clients">Clients</button>
+  <button data-tab="lists">Lists</button>
+  <button data-tab="settings">Rules &amp; schedules</button>
+  <button data-tab="feeds">Feeds</button>
+  <button data-tab="scans">Scans</button>
+  <button data-tab="requests">Access requests</button>
+  <button data-tab="allows">Temp allows</button>
+  <button data-tab="audit">Audit</button>
+</nav>
+<main>
+  <section id="overview" class="panel active">
+    <div class="tiles" id="tiles"></div>
+    <div class="charts">
+      <figure><figcaption>Requests and blocks per second</figcaption><canvas id="chart-rate" width="720" height="220"></canvas></figure>
+      <figure><figcaption>Top blocked hosts</figcaption><canvas id="chart-top" width="480" height="220"></canvas></figure>
+    </div>
+  </section>
+  <section id="events" class="panel">
+    <div class="toolbar">
+      <input id="ev-search" type="search" placeholder="Filter by host, path, client or reason">
+      <select id="ev-action"><option value="">all actions</option><option>allowed</option><option>blocked</option></select>
+      <label class="check"><input id="ev-pause" type="checkbox"> pause</label>
+    </div>
+    <table id="ev-table"><thead><tr><th>Time</th><th>Client</th><th>Method</th><th>URL</th><th>Status</th><th>Action</th><th>Reason</th><th>Rule</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section id="blocked" class="panel"><table id="top-table"><thead><tr><th>Host</th><th>Blocks</th></tr></thead><tbody></tbody></table></section>
+  <section id="clients" class="panel"><table id="clients-table"><thead><tr><th>Client</th><th>Requests</th><th>Blocked</th><th>Last seen</th></tr></thead><tbody></tbody></table></section>
+  <section id="lists" class="panel">
+    <div class="toolbar">
+      <select id="list-select" aria-label="List"></select>
+      <button id="list-save" class="primary">Validate &amp; save</button>
+      <button id="list-rollback">Roll back</button>
+      <span id="list-info" class="muted"></span>
+    </div>
+    <textarea id="list-text" spellcheck="false" aria-label="List content"></textarea>
+    <p class="muted">Changes are validated before they apply, kept as versions and written to the audit log.</p>
+  </section>
+  <section id="settings" class="panel">
+    <div class="grid2">
+      <div class="card">
+        <h2>Mode</h2>
+        <label class="check"><input type="radio" name="mode" value=""> as configured (<span id="cfg-mode">-</span>)</label>
+        <label class="check"><input type="radio" name="mode" value="enforce"> enforce</label>
+        <label class="check"><input type="radio" name="mode" value="monitor"> monitor (log only)</label>
+        <h2>Extra allowlist</h2>
+        <textarea id="allow-text" class="short" spellcheck="false" aria-label="Allowlist, one domain per line"></textarea>
+      </div>
+      <div class="card">
+        <h2>Categories &amp; schedules</h2>
+        <table id="cat-table"><thead><tr><th>Category</th><th>On</th><th>Schedule (e.g. Mon-Fri 09:00-17:00; blank = always)</th><th>Now</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div class="toolbar"><button id="settings-save" class="primary">Validate &amp; apply</button><button id="settings-rollback">Roll back</button><span id="settings-info" class="muted"></span></div>
+    <p class="muted">TLS, destination policy, ports and authentication can only be changed in the config file.</p>
+  </section>
+  <section id="feeds" class="panel"><table id="feeds-table"><thead><tr><th>Feed</th><th>Enabled</th><th>Entries</th><th>Active version</th><th>Last success</th><th></th></tr></thead><tbody></tbody></table></section>
+  <section id="scans" class="panel"><table id="scans-table"><thead><tr><th>Time</th><th>Client</th><th>File</th><th>Status</th><th>Engine</th><th>Signature</th><th>SHA-256</th></tr></thead><tbody></tbody></table></section>
+  <section id="requests" class="panel">
+    <div class="toolbar"><label>TTL hours <input id="req-ttl" type="number" min="1" max="24" value="4"></label></div>
+    <table id="req-table"><thead><tr><th>When</th><th>Client</th><th>Host</th><th>Reason</th><th>Justification</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
+  <section id="allows" class="panel">
+    <form id="allow-form" class="toolbar">
+      <input id="ta-host" placeholder="host" required>
+      <select id="ta-scope"><option value="client">client</option><option value="profile">profile</option></select>
+      <input id="ta-target" placeholder="client id or profile" required>
+      <input id="ta-ttl" type="number" min="1" max="24" value="4" aria-label="TTL hours">
+      <button type="submit" class="primary">Add temp allow</button>
+    </form>
+    <table id="ta-table"><thead><tr><th>Host</th><th>Scope</th><th>Expires</th><th>By</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
+  <section id="audit" class="panel"><table id="audit-table"><thead><tr><th>Time</th><th>Remote</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody></tbody></table></section>
+</main>
+<footer class="muted">Refreshes every 5 s. The token never leaves this tab's memory.</footer>
+</body>
+</html>

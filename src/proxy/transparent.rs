@@ -313,7 +313,7 @@ async fn tls_flow(
         let t = canonicalize(&authority(&ip.to_string()), TargetContext::ConnectAuthority)
             .map_err(|e| refuse(e.reason(), "invalid original destination"))?;
         note_target(ev, &t);
-        let d = deps.evaluate(&t, Phase::Resolved { ip }, &profile);
+        let d = deps.evaluate(&t, Phase::Resolved { ip }, &profile, &client_id);
         note_decision(ev, &d);
         if d.is_block() {
             return Ok(Outcome::Done);
@@ -325,13 +325,13 @@ async fn tls_flow(
         .map_err(|e| refuse(e.reason(), "invalid SNI"))?;
     note_target(ev, &t);
     ev.url_scheme = "https".into();
-    let d = deps.evaluate(&t, Phase::ConnectPreDns, &profile);
+    let d = deps.evaluate(&t, Phase::ConnectPreDns, &profile, &client_id);
     note_decision(ev, &d);
     if d.is_block() {
         return Ok(Outcome::Done); // nothing can be shown before the handshake: close
     }
     verify_host(&t, ip, ev, deps).await?;
-    if let Some(d) = resolved_rule(deps, &t, &[ip], &profile) {
+    if let Some(d) = resolved_rule(deps, &t, &[ip], &profile, &client_id) {
         note_decision(ev, &d);
         if d.is_block() {
             return Ok(Outcome::Done);

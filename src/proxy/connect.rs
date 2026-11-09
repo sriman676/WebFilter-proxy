@@ -99,14 +99,19 @@ where
     note_target(ev, &t);
     check_port(PortKind::Connect, t.port, &deps.cfg.ports)
         .map_err(|r| fail(403, r, "port not allowed"))?;
-    let d = deps.evaluate(&t, Phase::ConnectPreDns, profile);
+    // `CONNECT webfilter.local:443` with interception: the proxy is the origin (O6).
+    if super::vhost::is_vhost(deps, &t) && deps.leaves.is_some() {
+        let who = (id.to_owned(), Arc::clone(profile));
+        return intercept_tunnel(client, buf, t, Vec::new(), ev, deps, peer, who).await;
+    }
+    let d = deps.evaluate(&t, Phase::ConnectPreDns, profile, id);
     note_decision(ev, &d);
     if d.is_block() {
         send_block(client, ev, &d, deps).await;
         return Ok(Outcome::Done);
     }
     let ips = resolve(&t, ev, deps).await?;
-    if let Some(d) = resolved_rule(deps, &t, &ips, profile) {
+    if let Some(d) = resolved_rule(deps, &t, &ips, profile, id) {
         note_decision(ev, &d);
         if d.is_block() {
             send_block(client, ev, &d, deps).await;
@@ -286,7 +291,8 @@ where
     })?;
     // ALPN mirroring (D-40): a client offering h2 makes us ask the origin first; the client is
     // then offered exactly the protocol the origin selected, so both sides always match.
-    let (alpn, h2_upstream) = if hello.alpn.iter().any(|p| p == b"h2") {
+    // No upstream (the virtual host) means no probe and HTTP/1.1 only.
+    let (alpn, h2_upstream) = if hello.alpn.iter().any(|p| p == b"h2") && !tunnel.ips.is_empty() {
         let offer: Vec<Vec<u8>> = [&b"h2"[..], b"http/1.1"]
             .into_iter()
             .filter(|p| hello.alpn.iter().any(|c| c == p))

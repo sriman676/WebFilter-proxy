@@ -55,6 +55,18 @@ enum Command {
         #[command(subcommand)]
         command: CaCommand,
     },
+    /// Self-check: PASS/WARN/FAIL, exit 0/1/2 (SPEC_EXT_OPS O7).
+    Doctor,
+    /// Terminal dashboard over the admin API (O5). Token from --token-file or
+    /// WEBFILTER_ADMIN_TOKEN_FILE, never from the command line.
+    Tui {
+        /// Admin URL.
+        #[arg(long, default_value = "http://127.0.0.1:9090")]
+        admin: String,
+        /// File holding the admin token (first line).
+        #[arg(long, env = "WEBFILTER_ADMIN_TOKEN_FILE")]
+        token_file: std::path::PathBuf,
+    },
     /// Threat feeds (SPEC_EXT_POLICY P3).
     Feeds {
         #[command(subcommand)]
@@ -335,6 +347,44 @@ fn main() -> ExitCode {
     match &cli.command {
         Some(Command::HashPassword) => hash_password(),
         Some(Command::Ca { command }) => load(&cli).map_or_else(|code| code, |c| ca(&c, command)),
+        Some(Command::Doctor) => match load(&cli) {
+            Ok(c) => {
+                let results = webfilter::doctor::run(&c);
+                for (level, msg) in &results {
+                    println!("{}  {msg}", level.as_str());
+                }
+                match results.iter().map(|(l, _)| *l).max() {
+                    Some(webfilter::doctor::Level::Fail) => ExitCode::from(2),
+                    Some(webfilter::doctor::Level::Warn) => ExitCode::from(1),
+                    _ => ExitCode::SUCCESS,
+                }
+            }
+            Err(code) => code,
+        },
+        Some(Command::Tui { admin, token_file }) => {
+            let token = match std::fs::read_to_string(token_file) {
+                Ok(t) => t.lines().next().unwrap_or("").trim().to_owned(),
+                Err(e) => {
+                    eprintln!("error: cannot read the token file: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let client = match webfilter::tui::AdminClient::new(admin, token) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            match rt.and_then(|rt| rt.block_on(webfilter::tui::run(client))) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some(Command::Feeds { command }) => {
             load(&cli).map_or_else(|code| code, |c| feeds(&c, command))
         }

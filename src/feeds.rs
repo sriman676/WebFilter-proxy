@@ -598,6 +598,7 @@ pub struct FeedManager {
     active: ArcSwap<HashMap<String, Arc<FeedSet>>>,
     fetcher: Option<Fetcher>,
     sys: Option<SystemLog>,
+    updates: std::sync::Mutex<std::collections::BTreeMap<(String, &'static str), u64>>,
 }
 
 impl FeedManager {
@@ -616,6 +617,7 @@ impl FeedManager {
             active: ArcSwap::from_pointee(HashMap::new()),
             fetcher,
             sys,
+            updates: std::sync::Mutex::default(),
         };
         let mut map = HashMap::new();
         for f in me.feeds.iter().filter(|f| f.enabled) {
@@ -633,6 +635,17 @@ impl FeedManager {
         }
         me.active.store(Arc::new(map));
         me
+    }
+
+    fn count(&self, name: &str, result: &'static str) {
+        let mut u = self.updates.lock().unwrap_or_else(|e| e.into_inner());
+        *u.entry((name.to_owned(), result)).or_default() += 1;
+    }
+
+    /// Update attempts per (feed, result) for `/metrics`.
+    pub fn update_counts(&self) -> Vec<((String, &'static str), u64)> {
+        let u = self.updates.lock().unwrap_or_else(|e| e.into_inner());
+        u.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 
     fn event(&self, kind: SysEvent, detail: serde_json::Value) {
@@ -685,6 +698,7 @@ impl FeedManager {
         })();
         match &result {
             Ok(FeedUpdate::Updated { entries, delta, .. }) => {
+                self.count(name, "updated");
                 self.event(
                     SysEvent::FeedUpdated,
                     serde_json::json!({ "name": name, "entries": entries, "delta": delta }),
@@ -692,15 +706,19 @@ impl FeedManager {
             }
             Ok(FeedUpdate::NotModified) => {}
             Err(e @ FeedError::Rejected(_)) => {
+                self.count(name, "rejected");
                 self.event(
                     SysEvent::FeedRejected,
                     serde_json::json!({ "name": name, "error": e.to_string() }),
                 );
             }
-            Err(e) => self.event(
-                SysEvent::FeedFailed,
-                serde_json::json!({ "name": name, "error": e.to_string() }),
-            ),
+            Err(e) => {
+                self.count(name, "failed");
+                self.event(
+                    SysEvent::FeedFailed,
+                    serde_json::json!({ "name": name, "error": e.to_string() }),
+                );
+            }
         }
         result
     }
@@ -721,6 +739,7 @@ impl FeedManager {
         let fetched = match fetcher.fetch(&f.url, key.as_deref(), &meta, f.max_bytes).await {
             Ok(x) => x,
             Err(e) => {
+                self.count(name, "failed");
                 self.event(
                     SysEvent::FeedFailed,
                     serde_json::json!({ "name": name, "error": e.to_string() }),

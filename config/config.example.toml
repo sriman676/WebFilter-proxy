@@ -170,6 +170,7 @@ metrics_public = false
 max_body_bytes = 65536
 request_timeout_secs = 10
 max_connections = 64
+# allowed_hosts = []                # default: 127.0.0.1:<port>, localhost:<port>, [::1]:<port>; add an SSH-tunnel port here
 
 [access_requests]
 enabled = false

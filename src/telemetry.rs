@@ -142,10 +142,11 @@ impl Telemetry {
         }
         if let Some(id) = &ev.client_id {
             let mut clients = lock(&self.clients);
-            if clients.len() >= CLIENT_KEYS && !clients.contains_key(id) {
-                if let Some(k) = clients.iter().min_by_key(|(_, v)| v.0).map(|(k, _)| k.clone()) {
-                    clients.remove(&k);
-                }
+            if clients.len() >= CLIENT_KEYS
+                && !clients.contains_key(id)
+                && let Some(k) = clients.iter().min_by_key(|(_, v)| v.0).map(|(k, _)| k.clone())
+            {
+                clients.remove(&k);
             }
             let e = clients.entry(id.clone()).or_insert((0, 0, String::new()));
             e.0 += 1;

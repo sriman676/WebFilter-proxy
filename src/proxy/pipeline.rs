@@ -145,7 +145,21 @@ fn client_wants_keep_alive(h: &RequestHead) -> bool {
 pub(crate) fn host_equals(host: &[u8], t: &NormalizedTarget) -> bool {
     let host = String::from_utf8_lossy(host).to_ascii_lowercase();
     let default = format!(":{}", t.scheme.default_port());
-    host.strip_suffix(&default).unwrap_or(&host) == t.authority()
+    let host = host.strip_suffix(&default).unwrap_or(&host);
+    // One trailing dot names the same host (the canonical target never has it).
+    let (name, port) =
+        match host.rsplit_once(':').filter(|(n, _)| !n.ends_with(']') || n.starts_with('[')) {
+            Some((n, p)) if !host.ends_with(']') && p.bytes().all(|b| b.is_ascii_digit()) => {
+                (n, Some(p))
+            }
+            _ => (host, None),
+        };
+    let name = name.strip_suffix('.').unwrap_or(name);
+    let normalized = match port {
+        Some(p) => format!("{name}:{p}"),
+        None => name.to_owned(),
+    };
+    normalized == t.authority()
 }
 
 /// Fill the target fields of a log event.
@@ -178,8 +192,15 @@ pub(crate) async fn send<S: AsyncWrite + Unpin>(client: &mut S, bytes: &[u8], de
 }
 
 /// The rendered block page for a decision (SPEC 4.7).
-pub(crate) fn block_html(ev: &RequestEvent, d: &Decision, deps: &ProxyDeps) -> String {
-    deps.block_page.render(&BlockInfo {
+pub(crate) fn block_html(
+    ev: &RequestEvent,
+    d: &Decision,
+    deps: &ProxyDeps,
+) -> (String, Vec<(&'static str, String)>) {
+    let review = review(ev, d, deps);
+    let csp = review.csp();
+    let html = deps.block_page.render(&BlockInfo {
+        review,
         url: &ev.url,
         host: &ev.dest_host,
         reason: d.reason,
@@ -187,7 +208,32 @@ pub(crate) fn block_html(ev: &RequestEvent, d: &Decision, deps: &ProxyDeps) -> S
         category: d.category.as_deref(),
         event_id: &ev.event_id,
         timestamp: &ev.timestamp,
-    })
+    });
+    (html, csp.into_iter().collect())
+}
+
+/// Whether this block offers the access-request form (SPEC_EXT_OPS O6, D-59).
+fn review(ev: &RequestEvent, d: &Decision, deps: &ProxyDeps) -> crate::proxy::response::Review {
+    use crate::proxy::response::Review;
+    let cfg = &deps.cfg.access_requests;
+    let profile_on = ev
+        .profile
+        .as_deref()
+        .and_then(|p| deps.policies.load().profile(p).and_then(|p| p.access_requests))
+        == Some(true);
+    let Some(client) =
+        ev.client_id.as_deref().filter(|_| cfg.enabled && profile_on && d.is_block())
+    else {
+        return Review::Off;
+    };
+    if !crate::access::eligible(d.reason) {
+        return Review::NotReviewable;
+    }
+    let scheme = if ev.url_scheme == "https" { "https" } else { "http" };
+    Review::Form {
+        action: format!("{scheme}://{}/request", cfg.virtual_host),
+        csrf: deps.access.csrf.token(&ev.event_id, client),
+    }
 }
 
 /// Answer a limit rejection with `Retry-After` (D-51) and log it.
@@ -209,8 +255,8 @@ pub(crate) async fn send_block<S: AsyncWrite + Unpin>(
     d: &Decision,
     deps: &ProxyDeps,
 ) {
-    let html = block_html(ev, d, deps);
-    send(client, &page(403, d.reason, &ev.event_id, &html, &[]), deps).await;
+    let (html, extra) = block_html(ev, d, deps);
+    send(client, &page(403, d.reason, &ev.event_id, &html, &extra), deps).await;
     ev.status = 403;
 }
 
@@ -456,8 +502,12 @@ where
         ev.upgrade = Some("websocket".into());
     }
 
+    // The reserved access-request host is answered here, before DNS and rules (O6).
+    if super::vhost::is_vhost(deps, &t) {
+        return super::vhost::serve(client, buf, head, ev, deps, &id, &profile, framing, &t).await;
+    }
     // 8. Pre-DNS rules: a blocked name is never resolved.
-    let d = deps.evaluate(&t, Phase::PreDns, &profile);
+    let d = deps.evaluate(&t, Phase::PreDns, &profile, &id);
     note_decision(ev, &d);
     if d.is_block() {
         send_block(client, ev, &d, deps).await;
@@ -473,7 +523,7 @@ where
         }
         Via::Explicit => resolve(&t, ev, deps).await?,
     };
-    if let Some(d) = resolved_rule(deps, &t, &ips, &profile) {
+    if let Some(d) = resolved_rule(deps, &t, &ips, &profile, &id) {
         note_decision(ev, &d);
         if d.is_block() {
             send_block(client, ev, &d, deps).await;
@@ -496,9 +546,10 @@ pub(crate) fn resolved_rule(
     t: &NormalizedTarget,
     ips: &[IpAddr],
     profile: &Profile,
+    client: &str,
 ) -> Option<Decision> {
     ips.iter()
-        .map(|ip| deps.evaluate(t, Phase::Resolved { ip: *ip }, profile))
+        .map(|ip| deps.evaluate(t, Phase::Resolved { ip: *ip }, profile, client))
         .find(|d| d.reason != Reason::None)
 }
 
@@ -628,8 +679,12 @@ where
         single(&resp.headers, "content-type").map(|v| String::from_utf8_lossy(v).into_owned());
     ev.http_content_type =
         content_type.as_deref().map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
-    let d =
-        deps.evaluate(t, Phase::ResponseHeaders { content_type: content_type.as_deref() }, profile);
+    let d = deps.evaluate(
+        t,
+        Phase::ResponseHeaders { content_type: content_type.as_deref() },
+        profile,
+        ev.client_id.as_deref().unwrap_or_default(),
+    );
     if d.reason != Reason::None {
         note_decision(ev, &d);
     }

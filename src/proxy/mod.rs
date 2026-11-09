@@ -11,6 +11,7 @@ pub mod pipeline;
 pub mod response;
 pub mod scanning;
 pub mod transparent;
+pub mod vhost;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -201,6 +202,12 @@ pub struct ProxyDeps {
     pub feeds: Arc<crate::feeds::FeedManager>,
     /// Download scanning when `[scan] enabled` (D-53).
     pub scanner: Option<Arc<crate::scan::Scanner>>,
+    /// Admin views and metrics (O2/O3).
+    pub telemetry: Arc<crate::telemetry::Telemetry>,
+    /// Access requests and temp allows (O6).
+    pub access: Arc<crate::access::AccessState>,
+    /// Dashboard settings (A-30).
+    pub settings: arc_swap::ArcSwap<crate::profiles::Settings>,
     auth: ProxyAuth,
     per_ip: Mutex<HashMap<IpAddr, usize>>,
     shutdown: watch::Receiver<bool>,
@@ -215,12 +222,24 @@ impl ProxyDeps {
         RequestEvent {
             src_ip: fold_ip(peer.ip()).to_string(),
             src_port: peer.port(),
-            proxy_mode: if self.cfg.mode == Mode::Monitor { "monitor" } else { "enforce" },
+            proxy_mode: if self.mode() == Mode::Monitor { "monitor" } else { "enforce" },
             ..RequestEvent::default()
         }
     }
 
+    /// The effective global mode (config, or the dashboard setting).
+    pub fn mode(&self) -> Mode {
+        self.settings.load().mode.unwrap_or(self.cfg.mode)
+    }
+
     fn finish(&self, ev: RequestEvent) {
+        self.telemetry.record(&ev);
+        if ev.action == Action::Block.as_str()
+            && let (Some(id), Some(profile)) = (&ev.client_id, &ev.profile)
+            && let Some(reason) = Reason::ALL.iter().find(|r| r.as_str() == ev.reason)
+        {
+            self.access.recent.add(id, &ev.event_id, *reason, &ev.dest_host, profile);
+        }
         if let (Some(id), Some(name)) = (&ev.client_id, &ev.profile)
             && let Some(rate) = self.policies.load().profile(name).and_then(|p| p.rate)
         {
@@ -235,13 +254,34 @@ impl ProxyDeps {
         self.logger.log(ev);
     }
 
-    fn evaluate(&self, t: &NormalizedTarget, phase: Phase<'_>, profile: &Profile) -> Decision {
+    /// Rule order (O6): allowlist, feeds (never overridable), the client's temp allows, then the
+    /// remaining local rules. Safety policy is checked elsewhere and never here.
+    fn evaluate(
+        &self,
+        t: &NormalizedTarget,
+        phase: Phase<'_>,
+        profile: &Profile,
+        client: &str,
+    ) -> Decision {
         let now = time::OffsetDateTime::now_utc();
         let d = evaluate_profile(t, phase, &self.lists.snapshot(), profile, now);
-        if d.reason != Reason::None || profile.feeds.is_empty() {
-            return d; // an allowlist hit also bypasses feeds (list rules only, P1)
+        if d.reason == Reason::Allowlist {
+            return d;
         }
-        self.feeds.check(t, phase, &profile.feeds, profile.mode).unwrap_or(d)
+        if let Some(f) = self.feeds.check(t, phase, &profile.feeds, profile.mode) {
+            return f;
+        }
+        if crate::access::eligible(d.reason)
+            && let Some(id) = self.access.matches(client, &profile.name, t)
+        {
+            return Decision {
+                reason: Reason::Allowlist,
+                rule_id: Some(format!("temp_allow:{id}")),
+                rule_list: Some("temp_allows".into()),
+                ..Decision::allow()
+            };
+        }
+        d
     }
 
     /// Authenticate when users exist (per request, D-50); returns the user name.
@@ -284,9 +324,10 @@ impl ProxyDeps {
     /// Re-read users, clients and profiles from the config file; the old set stays on error.
     pub fn reload_policies(&self) -> Result<(), String> {
         let path = self.cfg.source.as_ref().ok_or("no config file")?;
+        let settings = self.settings.load_full();
         let result = Config::load(path)
             .map_err(|e| e.to_string())
-            .and_then(|c| PolicySet::build(&c))
+            .and_then(|c| PolicySet::build(&settings.apply(&c)))
             .map(|p| self.policies.store(Arc::new(p)));
         let detail = match &result {
             Ok(()) => serde_json::json!({ "ok": true }),
@@ -320,6 +361,8 @@ pub struct ProxyHandle {
     pub deps: Arc<ProxyDeps>,
     /// Transparent HTTP and TLS listener addresses when enabled (SPEC 4.17).
     pub transparent_addrs: Option<(SocketAddr, SocketAddr)>,
+    /// Admin listener address when enabled (O1).
+    pub admin_addr: Option<SocketAddr>,
     shutdown: watch::Sender<bool>,
     accept: Vec<tokio::task::JoinHandle<()>>,
     background: Vec<tokio::task::JoinHandle<()>>,
@@ -391,7 +434,13 @@ pub async fn start_with(
     own.extend(transparent_addrs.iter().flat_map(|(h, t)| [*h, *t]));
     let resolver = resolver.or_else(crate::policy::test_hosts_resolver);
     let (tx, rx) = watch::channel(false);
-    let policies = PolicySet::build(&cfg).map_err(invalid)?;
+    let (access, access_warning) =
+        crate::access::AccessState::load(&cfg.state.dir, cfg.access_requests.max_ttl_secs);
+    let (settings, settings_warning) = crate::admin::edit::load_settings(&cfg.state.dir);
+    let policies = PolicySet::build(&settings.apply(&cfg)).map_err(invalid)?;
+    if !settings.categories.is_empty() {
+        let _ = lists.set_category_overrides(settings.categories.clone());
+    }
     let scanner = if cfg.scan.enabled {
         Some(Arc::new(crate::scan::Scanner::new(cfg.scan.clone()).map_err(invalid)?))
     } else {
@@ -408,7 +457,8 @@ pub async fn start_with(
         }),
         Some(sys.clone()),
     ));
-    let mode = if cfg.mode == Mode::Monitor { "monitor" } else { "enforce" };
+    let mode =
+        if settings.mode.unwrap_or(cfg.mode) == Mode::Monitor { "monitor" } else { "enforce" };
     let deps = Arc::new(ProxyDeps {
         policy: DestPolicy::new(cfg.destination.deny_private_ranges, own),
         orig_dst: orig_dst
@@ -426,6 +476,9 @@ pub async fn start_with(
         limiter: Limiter::new(Arc::new(SystemClock), crate::limiter::MAX_KEYS),
         feeds: Arc::clone(&feeds),
         scanner,
+        telemetry: Arc::new(crate::telemetry::Telemetry::default()),
+        access: Arc::new(access),
+        settings: arc_swap::ArcSwap::from_pointee(settings),
         auth: ProxyAuth::new(),
         per_ip: Mutex::new(HashMap::new()),
         shutdown: rx,
@@ -441,12 +494,21 @@ pub async fn start_with(
         serde_json::json!({ "domains": report.domains, "regexes": report.regexes, "ips": report.ips, "warnings": report.warnings }),
     );
     sys.insecure_files(deps.cfg.policy_files());
+    for w in [access_warning, settings_warning].into_iter().flatten() {
+        sys.event(SysEvent::ConfigLoaded, serde_json::json!({ "state_warning": w }));
+    }
 
     let watcher =
         lists.spawn_watcher(Duration::from_secs(deps.cfg.blocklists.reload_interval_secs), sys);
     let stats_task = tokio::spawn(stats_loop(Arc::clone(&deps)));
     let policy_task = tokio::spawn(policy_watch(Arc::clone(&deps)));
     let feed_tasks = feeds.spawn();
+    let sweeper = tokio::spawn(temp_allow_sweeper(Arc::clone(&deps)));
+    let admin = if deps.cfg.admin.enabled {
+        Some(crate::admin::spawn(Arc::clone(&deps)).await?)
+    } else {
+        None
+    };
     let mut accept =
         vec![tokio::spawn(accept_loop(listener, Arc::clone(&deps), Listener::Explicit))];
     if let Some((http, tls)) = transparent {
@@ -459,7 +521,12 @@ pub async fn start_with(
         transparent_addrs,
         shutdown: tx,
         accept,
-        background: [watcher, stats_task, policy_task].into_iter().chain(feed_tasks).collect(),
+        admin_addr: admin.as_ref().map(|(a, _)| *a),
+        background: [watcher, stats_task, policy_task, sweeper]
+            .into_iter()
+            .chain(feed_tasks)
+            .chain(admin.map(|(_, t)| t))
+            .collect(),
     })
 }
 
@@ -492,6 +559,20 @@ fn load_ca(cfg: &Config, sys: &SystemLog) -> std::io::Result<crate::tls::LeafCac
         Err(e) => {
             sys.event(SysEvent::CaPermissionError, serde_json::json!({ "error": e.to_string() }));
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))
+        }
+    }
+}
+
+/// Expire temp allows (O6): `temp_allow_expired` events.
+async fn temp_allow_sweeper(deps: Arc<ProxyDeps>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tick.tick().await;
+        for a in deps.access.sweep() {
+            deps.logger.system().event(
+                SysEvent::TempAllowExpired,
+                serde_json::json!({ "id": a.id, "host": a.host }),
+            );
         }
     }
 }
