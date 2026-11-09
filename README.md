@@ -15,7 +15,9 @@ logs, plus a client that fetches URLs through the proxy and saves them as named 
 - **Transparent mode** (Linux netns lab only), proxy auth (argon2id), per-IP connection limits.
 - **Logs**: JSON lines (request, system, stats), no secrets/bodies/query values, rotation; OpenSearch
   stack and 16 detections in `siem/opensearch/`.
-- **Client**: fetches URLs through the proxy, verifies TLS, follows redirects safely, saves named HTML files.
+- **Client**: fetches URLs through the proxy, verifies TLS, follows redirects safely, saves named HTML files;
+  batch input files, retries with backoff, a JSONL manifest with verified resume, offline snapshots (sanitized,
+  same-site assets only) and a polite crawler that always honors robots.txt.
 
 ## Quick start
 ```bash
@@ -32,6 +34,25 @@ global `--config`, `--listen`, `--mode enforce|monitor`, `--log-dir`. Signals: S
 SIGUSR1 reopens logs, SIGINT/SIGTERM drain and stop. Client: `webfilter-client --help` (`--proxy`,
 `--out-dir`, `--name`, `--ca-cert`, `--jobs`, `--max-bytes`, `--save-blocked`, `--json`; exit 0 ok,
 1 error, 2 usage, 3 blocked).
+
+## Client: batches, snapshots, crawls (v1.1)
+```bash
+webfilter-client --input-file urls.txt --manifest run.jsonl          # one URL per line, # comments, deduplicated
+webfilter-client --input-file urls.txt --manifest run.jsonl --resume # skips files still intact (size + SHA-256)
+webfilter-client --retries 3 --retry-max-delay 30 https://example.com  # 408/429/502/503/504 and network errors only
+webfilter-client --resume-partial https://example.com/big.html      # continues .part files (Range + If-Range)
+webfilter-client --snapshot https://example.com                     # page + same-site images/CSS/fonts in <name>_files/
+webfilter-client --crawl-depth 2 --max-pages 50 https://example.com # -> output/example.com_crawl/index.html
+```
+- Never retried: proxy blocks, TLS errors, usage errors, other 4xx, size limits. `Retry-After` is honored up to the cap.
+- Snapshots remove scripts, event handlers, frames, plugins, `<base>` and meta refresh, add a CSP meta that allows
+  only local files, and list every omitted asset (cross-site, blocked, wrong type, too big) in
+  `<name>_snapshot_report.json`. `--snapshot-extra-host cdn.example` allows one CDN; `--snapshot-allow-scripts` is not recommended.
+- Crawls stay on the start host (`--crawl-subdomains` widens it), wait at least 250 ms between requests to a host
+  (`--crawl-delay-ms`, robots `Crawl-delay`), cap query variants, path depth and total time (`--crawl-timeout`),
+  save only `text/html` pages and rewrite internal links to the saved files. robots.txt 4xx = allow, 5xx/timeout = stop.
+- Every request still goes through the proxy, so filters, limits and scans apply; a summary line reports
+  `pages`, `assets`, `blocked`, `skipped` and `retries`. `--json` adds `attempts`, `snapshot_report`, `crawl_depth`.
 
 ## Customization
 - Lists: `blocklists/*.txt` (hot-reloaded); test a URL with `webfilter-proxy blocklist test <url>`.

@@ -52,6 +52,23 @@ pub struct ClientOptions {
     pub save_blocked: bool,
     /// `User-Agent`.
     pub user_agent: String,
+    /// Retries of transient failures (C2, max 10).
+    pub retries: u32,
+    /// Cap for backoff and `Retry-After`.
+    pub retry_max_delay: Duration,
+    /// Continue `.part` files with `Range` + `If-Range`.
+    pub resume_partial: bool,
+    /// Save pages with their same-site assets for offline viewing (C3).
+    pub snapshot: Option<SnapshotOptions>,
+}
+
+/// `--snapshot` settings.
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotOptions {
+    /// Keep scripts (not recommended).
+    pub allow_scripts: bool,
+    /// Extra asset hosts (CDNs) allowed besides the page's own site.
+    pub extra_hosts: Vec<String>,
 }
 
 /// Why a fetch was blocked (from the proxy's block response).
@@ -123,6 +140,16 @@ pub struct FetchResult {
     /// Usage error for this URL.
     #[serde(skip)]
     pub usage_error: bool,
+    /// Requests made (retries included).
+    pub attempts: u32,
+    /// Snapshot report (`--snapshot`).
+    pub snapshot_report: Option<PathBuf>,
+    /// Link depth of a crawled page (`--crawl-depth`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crawl_depth: Option<u8>,
+    /// SHA-256 of the saved file (manifest).
+    #[serde(skip)]
+    pub sha256: Option<String>,
 }
 
 impl FetchResult {
@@ -156,6 +183,37 @@ pub fn exit_code(results: &[FetchResult]) -> i32 {
     } else {
         0
     }
+}
+
+/// A finished GET after redirects (and retries).
+#[derive(Debug)]
+pub enum Outcome {
+    /// An origin response (any status).
+    Ok {
+        /// URL that answered.
+        final_url: Url,
+        /// Status.
+        status: u16,
+        /// Headers.
+        headers: hyper::HeaderMap,
+        /// Body (bounded by `max_bytes`).
+        body: Vec<u8>,
+    },
+    /// The proxy blocked it.
+    Blocked {
+        /// Block details.
+        info: BlockInfo,
+        /// The block page.
+        page: Vec<u8>,
+    },
+}
+
+/// Bytes received before a failure, kept for `--resume-partial` (C2).
+#[derive(Debug, Default, Clone)]
+struct Partial {
+    data: Vec<u8>,
+    etag: Option<String>,
+    last_modified: Option<String>,
 }
 
 /// One HTTP response, body fully read (bounded).
@@ -225,13 +283,14 @@ fn tls_config(extra: &[PathBuf]) -> Result<Arc<rustls::ClientConfig>, ClientErro
 pub struct Client {
     opts: ClientOptions,
     tls: Arc<rustls::ClientConfig>,
+    partials: std::sync::Mutex<std::collections::HashMap<String, Partial>>,
 }
 
 impl Client {
     /// Build a client; fails on unreadable `--ca-cert` files.
     pub fn new(opts: ClientOptions) -> Result<Self, ClientError> {
         let tls = tls_config(&opts.ca_certs)?;
-        Ok(Self { opts, tls })
+        Ok(Self { opts, tls, partials: std::sync::Mutex::default() })
     }
 
     fn proxy_authorization(&self) -> Option<String> {
@@ -274,12 +333,7 @@ impl Client {
             Ok((url, warning)) => {
                 result.url = url.to_string();
                 result.warnings.extend(warning);
-                match tokio::time::timeout(self.opts.timeout, self.fetch_url(url, &mut result))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(_) => Err(ClientError::Timeout),
-                }
+                self.fetch_url(url, &mut result).await
             }
             Err(e) => {
                 result.usage_error = true;
@@ -293,30 +347,76 @@ impl Client {
         result
     }
 
-    async fn fetch_url(&self, original: Url, result: &mut FetchResult) -> Result<(), ClientError> {
-        let name = self.opts.name.clone().unwrap_or_else(|| output_filename(original.as_str()));
-        let mut url = original;
+    /// The client options.
+    pub fn options(&self) -> &ClientOptions {
+        &self.opts
+    }
+
+    /// GET with redirects and retries of transient failures (C2). Returns the outcome and the
+    /// number of requests made. Each attempt has the whole-fetch timeout.
+    pub async fn get(
+        &self,
+        url: &Url,
+        extra: &[(&'static str, String)],
+    ) -> (Result<Outcome, ClientError>, u32) {
+        self.get_within(url, extra, &|_| true).await
+    }
+
+    /// [`Client::get`] that refuses redirects to URLs outside `scope` (crawl, C4).
+    pub async fn get_within(
+        &self,
+        url: &Url,
+        extra: &[(&'static str, String)],
+        scope: &(dyn Fn(&Url) -> bool + Sync),
+    ) -> (Result<Outcome, ClientError>, u32) {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let r = tokio::time::timeout(self.opts.timeout, self.get_once(url, extra, scope))
+                .await
+                .unwrap_or(Err(ClientError::Timeout));
+            let retry = match &r {
+                Ok(Outcome::Ok { status, headers, .. })
+                    if crate::batch::retryable_status(*status) =>
+                {
+                    let server = headers
+                        .get(hyper::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| crate::batch::retry_after(v, std::time::SystemTime::now()));
+                    Some(server)
+                }
+                Err(ClientError::Network(_) | ClientError::Timeout) => Some(None),
+                _ => None, // BLOCKED, TLS, usage, size and other 4xx are never retried
+            };
+            match retry {
+                Some(server) if attempt <= self.opts.retries.min(crate::batch::MAX_RETRIES) => {
+                    let mut r = [0u8; 2];
+                    let _ = getrandom::fill(&mut r);
+                    let jitter = f64::from(u16::from_be_bytes(r)) / f64::from(u16::MAX);
+                    let delay =
+                        crate::batch::backoff(attempt, server, self.opts.retry_max_delay, jitter);
+                    tokio::time::sleep(delay).await;
+                }
+                _ => return (r, attempt),
+            }
+        }
+    }
+
+    async fn get_once(
+        &self,
+        original: &Url,
+        extra: &[(&'static str, String)],
+        scope: &(dyn Fn(&Url) -> bool + Sync),
+    ) -> Result<Outcome, ClientError> {
+        let mut url = original.clone();
         let mut visited = HashSet::new();
         loop {
-            result.final_url = url.to_string();
             if !visited.insert(url.to_string()) {
                 return Err(ClientError::Redirect("redirect loop".into()));
             }
-            match self.hop(&url).await? {
-                Hop::Blocked(info, page) => {
-                    result.blocked = true;
-                    result.status = Some(403);
-                    result.event_id = info.event_id;
-                    result.reason = info.reason;
-                    if self.opts.save_blocked {
-                        let stem = name.strip_suffix(".html").unwrap_or(&name);
-                        result.saved_path =
-                            Some(self.save(&format!("{stem}.blocked.html"), page).await?);
-                    }
-                    return Ok(());
-                }
+            match self.hop(&url, extra).await? {
+                Hop::Blocked(info, page) => return Ok(Outcome::Blocked { info, page }),
                 Hop::Response(resp) => {
-                    result.status = Some(resp.status);
                     let location =
                         resp.headers.get(hyper::header::LOCATION).and_then(|v| v.to_str().ok());
                     if matches!(resp.status, 301 | 302 | 303 | 307 | 308) && location.is_some() {
@@ -327,34 +427,295 @@ impl Client {
                             )));
                         }
                         url = next_hop(&url, location.unwrap_or(""))?;
+                        if !scope(&url) {
+                            return Err(ClientError::Redirect(format!(
+                                "redirect out of scope not followed: {}",
+                                url.origin().ascii_serialization()
+                            )));
+                        }
                         continue;
                     }
-                    result.bytes = resp.body.len() as u64;
-                    let header =
-                        |n| resp.headers.get(n).and_then(|v| v.to_str().ok()).map(str::to_owned);
-                    result.content_type = header(hyper::header::CONTENT_TYPE)
-                        .map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
-                    if !(200..300).contains(&resp.status) {
-                        return Err(ClientError::Protocol(format!("HTTP {}", resp.status)));
-                    }
-                    if result.content_type.as_deref().is_some_and(|c| c != "text/html") {
-                        result.warnings.push(format!(
-                            "content type is {}, saved as .html anyway",
-                            result.content_type.as_deref().unwrap_or("")
-                        ));
-                    }
-                    if header(hyper::header::CONTENT_ENCODING)
-                        .is_some_and(|e| !e.eq_ignore_ascii_case("identity"))
-                    {
-                        result
-                            .warnings
-                            .push("server sent an encoded body; saved as received".into());
-                    }
-                    result.saved_path = Some(self.save(&name, resp.body).await?);
-                    return Ok(());
+                    return Ok(Outcome::Ok {
+                        final_url: url,
+                        status: resp.status,
+                        headers: resp.headers,
+                        body: resp.body,
+                    });
                 }
             }
         }
+    }
+
+    fn part_paths(&self, name: &str) -> (PathBuf, PathBuf) {
+        let dir = &self.opts.out_dir;
+        (dir.join(format!(".{name}.part")), dir.join(format!(".{name}.part.json")))
+    }
+
+    /// `Range` + `If-Range` for an existing partial download of `url` (C2).
+    fn resume_headers(
+        &self,
+        url: &Url,
+        name: &str,
+    ) -> (Vec<(&'static str, String)>, Option<Vec<u8>>) {
+        if !self.opts.resume_partial {
+            return (Vec::new(), None);
+        }
+        let (part, meta) = self.part_paths(name);
+        let meta: Option<serde_json::Value> =
+            std::fs::read(&meta).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let Some(meta) =
+            meta.filter(|m| m.get("url").and_then(serde_json::Value::as_str) == Some(url.as_str()))
+        else {
+            return (Vec::new(), None);
+        };
+        let field = |k: &str| meta.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
+        let validator = field("etag").or_else(|| field("last_modified"));
+        match (std::fs::read(&part), validator) {
+            (Ok(data), Some(v)) if !data.is_empty() => {
+                (vec![("range", format!("bytes={}-", data.len())), ("if-range", v)], Some(data))
+            }
+            _ => (Vec::new(), None),
+        }
+    }
+
+    fn keep_partial(&self, url: &Url, name: &str) {
+        let p = self.partials.lock().unwrap_or_else(|e| e.into_inner()).remove(url.as_str());
+        if let Some(p) =
+            p.filter(|p| !p.data.is_empty() && (p.etag.is_some() || p.last_modified.is_some()))
+        {
+            let (part, meta) = self.part_paths(name);
+            let m = serde_json::json!({ "url": url.as_str(), "etag": p.etag, "last_modified": p.last_modified });
+            let _ =
+                std::fs::write(&part, &p.data).and_then(|()| std::fs::write(&meta, m.to_string()));
+        }
+    }
+
+    async fn fetch_url(&self, original: Url, result: &mut FetchResult) -> Result<(), ClientError> {
+        let name = self.opts.name.clone().unwrap_or_else(|| output_filename(original.as_str()));
+        let (extra, partial) = self.resume_headers(&original, &name);
+        let (outcome, attempts) = self.get(&original, &extra).await;
+        result.attempts = attempts;
+        result.final_url = original.to_string();
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => {
+                if self.opts.resume_partial {
+                    self.keep_partial(&original, &name);
+                }
+                return Err(e);
+            }
+        };
+        self.partials.lock().unwrap_or_else(|e| e.into_inner()).remove(original.as_str());
+        match outcome {
+            Outcome::Blocked { info, page } => {
+                result.blocked = true;
+                result.status = Some(403);
+                result.event_id = info.event_id;
+                result.reason = info.reason;
+                if self.opts.save_blocked {
+                    let stem = name.strip_suffix(".html").unwrap_or(&name);
+                    result.saved_path =
+                        Some(self.save(&format!("{stem}.blocked.html"), page).await?);
+                }
+                Ok(())
+            }
+            Outcome::Ok { final_url, status, headers, mut body } => {
+                result.final_url = final_url.to_string();
+                result.status = Some(status);
+                let header = |n| {
+                    headers
+                        .get(n)
+                        .and_then(|v: &hyper::header::HeaderValue| v.to_str().ok())
+                        .map(str::to_owned)
+                };
+                if status == 206 {
+                    // Resume: the range must start exactly where the partial file ends (C2).
+                    let start = header(hyper::header::CONTENT_RANGE).and_then(|r| {
+                        r.strip_prefix("bytes ")?.split('-').next()?.parse::<usize>().ok()
+                    });
+                    match partial {
+                        Some(mut p) if start == Some(p.len()) => {
+                            p.extend_from_slice(&body);
+                            body = p;
+                            result.status = Some(200);
+                        }
+                        _ => {
+                            let (part, meta) = self.part_paths(&name);
+                            let _ = std::fs::remove_file(part);
+                            let _ = std::fs::remove_file(meta);
+                            return Err(ClientError::Protocol(
+                                "partial response does not continue the .part file; restart".into(),
+                            ));
+                        }
+                    }
+                }
+                if self.opts.resume_partial {
+                    let (part, meta) = self.part_paths(&name);
+                    let _ = std::fs::remove_file(part);
+                    let _ = std::fs::remove_file(meta);
+                }
+                result.bytes = body.len() as u64;
+                result.content_type = header(hyper::header::CONTENT_TYPE)
+                    .map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
+                if !(200..300).contains(&status) {
+                    return Err(ClientError::Protocol(format!("HTTP {status}")));
+                }
+                let html = result.content_type.as_deref().is_none_or(|c| c == "text/html");
+                if !html {
+                    result.warnings.push(format!(
+                        "content type is {}, saved as .html anyway",
+                        result.content_type.as_deref().unwrap_or("")
+                    ));
+                }
+                if header(hyper::header::CONTENT_ENCODING)
+                    .is_some_and(|e| !e.eq_ignore_ascii_case("identity"))
+                {
+                    result.warnings.push("server sent an encoded body; saved as received".into());
+                }
+                result.sha256 = Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body)));
+                let saved = self.save(&name, body.clone()).await?;
+                if let (Some(opts), true) = (&self.opts.snapshot, html) {
+                    let page = String::from_utf8_lossy(&body).into_owned();
+                    match self.snapshot(&final_url, &page, &saved, opts).await {
+                        Ok(report) => result.snapshot_report = Some(report),
+                        Err(e) => result.warnings.push(format!("snapshot: {e}")),
+                    }
+                    result.sha256 = crate::batch::file_sha256(&saved);
+                }
+                result.saved_path = Some(saved);
+                Ok(())
+            }
+        }
+    }
+
+    /// Fetch the page's same-site assets and rewrite the saved page to use them (C3). Returns
+    /// the report path.
+    pub async fn snapshot(
+        &self,
+        page: &Url,
+        html: &str,
+        saved: &std::path::Path,
+        opts: &SnapshotOptions,
+    ) -> Result<PathBuf, ClientError> {
+        use crate::snapshot as snap;
+        let io = |e: std::io::Error| ClientError::Io(e.to_string());
+        let dir = saved.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let file = saved.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = file.strip_suffix(".html").unwrap_or(&file).to_owned();
+        let mut queue: std::collections::VecDeque<(Url, u8)> =
+            snap::plan(html, page, opts.allow_scripts).into_iter().map(|u| (u, 0)).collect();
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut css: Vec<(Url, String, String)> = Vec::new(); // (url, local, text) rewritten at the end
+        let mut omitted: Vec<snap::Omitted> = Vec::new();
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        let (mut count, mut total) = (0usize, 0u64);
+        let mut seen = HashSet::new();
+        let omit = |omitted: &mut Vec<snap::Omitted>,
+                    url: &Url,
+                    reason: &str,
+                    event_id: Option<String>| {
+            omitted.push(snap::Omitted {
+                url: url.to_string(),
+                reason: reason.to_owned(),
+                event_id,
+            });
+        };
+        while let Some((url, depth)) = queue.pop_front() {
+            if !seen.insert(url.to_string()) {
+                continue;
+            }
+            if count >= snap::MAX_ASSETS {
+                omit(&mut omitted, &url, "asset limit (200)", None);
+                continue;
+            }
+            if !snap::same_site(page, &url, &opts.extra_hosts) {
+                omit(&mut omitted, &url, "cross-site", None);
+                continue;
+            }
+            let (r, _) = self.get(&url, &[]).await;
+            let (status, headers, body) = match r {
+                Ok(Outcome::Ok { status, headers, body, .. }) => (status, headers, body),
+                Ok(Outcome::Blocked { info, .. }) => {
+                    omit(
+                        &mut omitted,
+                        &url,
+                        &format!("blocked: {}", info.reason.unwrap_or_default()),
+                        info.event_id,
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    omit(&mut omitted, &url, &e.to_string(), None);
+                    continue;
+                }
+            };
+            let media = headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|c| c.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !(200..300).contains(&status) {
+                omit(&mut omitted, &url, &format!("HTTP {status}"), None);
+                continue;
+            }
+            if !snap::allowed_media(&media) {
+                omit(&mut omitted, &url, &format!("media type {media} not allowed"), None);
+                continue;
+            }
+            let len = body.len() as u64;
+            if len > snap::MAX_ASSET_BYTES || total + len > snap::MAX_PAGE_BYTES {
+                omit(&mut omitted, &url, "size limit", None);
+                continue;
+            }
+            count += 1;
+            total += len;
+            let local = snap::local_name(&stem, &url, &media);
+            map.insert(url.to_string(), local.clone());
+            if media == "text/css" {
+                let text = String::from_utf8_lossy(&body).into_owned();
+                for (_, r) in snap::css_refs(&text) {
+                    if let Ok(u) = url.join(&r) {
+                        if depth < snap::MAX_CSS_DEPTH && matches!(u.scheme(), "http" | "https") {
+                            queue.push_back((u, depth + 1));
+                        } else if matches!(u.scheme(), "http" | "https")
+                            && !seen.contains(u.as_str())
+                        {
+                            omit(&mut omitted, &u, "css import depth", None);
+                        }
+                    }
+                }
+                css.push((url, local, text));
+            } else {
+                files.push((local, body));
+            }
+        }
+        // CSS files reference siblings in the same `_files` directory.
+        for (url, local, text) in css {
+            let rewritten = snap::rewrite_css(&text, &|r: &str| {
+                let u = url.join(r).ok()?;
+                map.get(u.as_str()).map(|l| l.rsplit('/').next().unwrap_or(l).to_owned())
+            });
+            files.push((local, rewritten.into_bytes()));
+        }
+        if !files.is_empty() {
+            std::fs::create_dir(dir.join(format!("{stem}_files"))).map_err(io)?;
+        }
+        for (local, data) in files {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dir.join(&local))
+                .map_err(io)?;
+            std::io::Write::write_all(&mut f, &data).map_err(io)?;
+        }
+        let page_html = snap::rewrite(html, page, &map, opts.allow_scripts);
+        std::fs::write(saved, page_html).map_err(io)?;
+        let report = dir.join(format!("{stem}_snapshot_report.json"));
+        let json =
+            serde_json::json!({ "page": page.as_str(), "assets": map.len(), "omitted": omitted });
+        std::fs::write(&report, serde_json::to_vec_pretty(&json).unwrap_or_default())
+            .map_err(io)?;
+        Ok(report)
     }
 
     async fn save(&self, name: &str, body: Vec<u8>) -> Result<PathBuf, ClientError> {
@@ -380,7 +741,7 @@ impl Client {
     }
 
     /// One request through the proxy.
-    async fn hop(&self, url: &Url) -> Result<Hop, ClientError> {
+    async fn hop(&self, url: &Url, extra: &[(&'static str, String)]) -> Result<Hop, ClientError> {
         let host =
             url.host_str().ok_or_else(|| ClientError::Usage("URL has no host".into()))?.to_owned();
         let port = url.port_or_known_default().unwrap_or(443);
@@ -390,7 +751,7 @@ impl Client {
         };
         let mut stream = self.connect_proxy().await?;
         if url.scheme() == "http" {
-            return self.request(stream, url.as_str(), &authority, true).await;
+            return self.request(stream, url.as_str(), &authority, true, url.as_str(), extra).await;
         }
         // https: manual CONNECT so the proxy's answer (e.g. a block) is visible (D-25).
         let auth = self
@@ -431,10 +792,13 @@ impl Client {
                 };
                 return Ok(Hop::Blocked(info, buf));
             }
-            return Err(ClientError::Network(format!(
-                "proxy refused CONNECT: HTTP {}",
-                head.status
-            )));
+            let refused = format!("proxy refused CONNECT: HTTP {}", head.status);
+            // Only transient refusals (limits, overload) are retried (C2).
+            return Err(if crate::batch::retryable_status(head.status) {
+                ClientError::Network(refused)
+            } else {
+                ClientError::Protocol(refused)
+            });
         }
         let server =
             ServerName::try_from(host.clone()).map_err(|e| ClientError::Tls(e.to_string()))?;
@@ -446,7 +810,7 @@ impl Client {
             Some(q) => format!("{}?{q}", url.path()),
             None => url.path().to_owned(),
         };
-        self.request(tls, &target, &authority, false).await
+        self.request(tls, &target, &authority, false, url.as_str(), extra).await
     }
 
     /// Send a GET on `io` (absolute-form to the proxy, or origin-form inside a tunnel).
@@ -456,6 +820,8 @@ impl Client {
         target: &str,
         authority: &str,
         via_proxy: bool,
+        key: &str,
+        extra: &[(&'static str, String)],
     ) -> Result<Hop, ClientError>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -473,6 +839,9 @@ impl Client {
         if via_proxy && let Some(a) = self.proxy_authorization() {
             req = req.header("proxy-authorization", a);
         }
+        for (name, value) in extra {
+            req = req.header(*name, value.as_str());
+        }
         let req = req.body(Empty::<Bytes>::new()).map_err(|e| ClientError::Usage(e.to_string()))?;
         let resp =
             sender.send_request(req).await.map_err(|e| ClientError::Network(e.to_string()))?;
@@ -485,6 +854,20 @@ impl Client {
                 .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"blocked"));
         let mut body = resp.into_body();
         let mut data = Vec::new();
+        // `--resume-partial`: remember validators and the bytes so far, in case this fails.
+        let header = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let track = self.opts.resume_partial
+            && !blocked
+            && status == 200
+            && (header("etag").is_some() || header("last-modified").is_some());
+        if track {
+            let p = Partial {
+                data: Vec::new(),
+                etag: header("etag"),
+                last_modified: header("last-modified"),
+            };
+            self.partials.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_owned(), p);
+        }
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|e| ClientError::Network(e.to_string()))?;
             if let Some(chunk) = frame.data_ref() {
@@ -492,6 +875,12 @@ impl Client {
                     return Err(ClientError::TooLarge);
                 }
                 data.extend_from_slice(chunk);
+                if track
+                    && let Some(p) =
+                        self.partials.lock().unwrap_or_else(|e| e.into_inner()).get_mut(key)
+                {
+                    p.data.extend_from_slice(chunk);
+                }
             }
         }
         if blocked {

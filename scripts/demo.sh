@@ -11,7 +11,9 @@ bin=${CARGO_TARGET_DIR:-target}/release
 work=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$work"' EXIT
 mkdir -p "$work/site1" "$work/site2"
-echo '<h1>site one</h1>' >"$work/site1/index.html"
+echo '<h1>site one</h1><img src="logo.png"><a href="about.html">about</a>' >"$work/site1/index.html"
+echo '<h1>about</h1><a href="index.html">home</a><script>alert(1)</script>' >"$work/site1/about.html"
+printf '\x89PNG\r\n\x1a\n' >"$work/site1/logo.png"
 echo '<h1>site two</h1>' >"$work/site2/index.html"
 python3 -m http.server 18081 --bind 127.0.0.1 -d "$work/site1" >/dev/null 2>&1 &
 python3 -m http.server 18082 --bind 127.0.0.1 -d "$work/site2" >/dev/null 2>&1 &
@@ -40,7 +42,12 @@ echo "files saved: $(find "$work/output" -name '*.html' | wc -l)"
 step "5. Last JSON log lines (logs/webfilter.jsonl)"
 tail -n 3 logs/webfilter.jsonl
 
-step "6. Intercepted HTTPS demo: see Phase 4 (TLS interception)"
+step "6. v1.1 client: offline snapshot and a polite crawl (robots.txt honored, >= 250 ms per host)"
+client --snapshot http://127.0.0.1:18081/index.html
+client --crawl-depth 1 --max-pages 5 http://127.0.0.1:18081/index.html
+find "$work/output" -path '*_files*' -o -name '*_crawl' -o -name '*snapshot_report.json' | sort
+
+step "7. Intercepted HTTPS demo: see Phase 4 (TLS interception)"
 kill -INT "$proxy"
 wait "$proxy" || true
 echo "proxy stopped cleanly"

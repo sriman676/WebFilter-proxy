@@ -105,7 +105,7 @@ pentest-p10:
 pentest-p11:
     scripts/pentest_p11.sh
 pentest-p12:
-    @echo "TODO: pentest-p12 lands in Phase 12 (PENTEST_PLAN_EXT PT-12.x)" >&2; exit 1
+    scripts/pentest_p12.sh
 pentest-p13:
     @echo "TODO: pentest-p13 lands in Phase 13 (PENTEST_PLAN_EXT PT-13.x)" >&2; exit 1
 
