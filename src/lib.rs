@@ -3,6 +3,7 @@
 //! Behaviour is specified in `docs/SPEC.md`; module contracts in `docs/INTERFACES.md`.
 #![forbid(unsafe_code)]
 
+pub mod access;
 pub mod auth;
 pub mod blocklist;
 pub mod client;
@@ -19,4 +20,5 @@ pub mod proxy;
 pub mod reason;
 pub mod scan;
 pub mod schedule;
+pub mod telemetry;
 pub mod tls;

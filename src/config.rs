@@ -125,10 +125,10 @@ pub struct Config {
     pub feeds_global: FeedsGlobalConfig,
     /// Download hashing and scanning (P4); off by default.
     pub scan: ScanConfig,
-    /// v1.1 placeholder, typed in Phase 11.
-    pub access_requests: Option<RawSection>,
-    /// v1.1 placeholder, typed in Phase 11.
-    pub state: Option<RawSection>,
+    /// Access-request workflow (SPEC_EXT_OPS O6).
+    pub access_requests: AccessRequestsConfig,
+    /// State directory (O8).
+    pub state: StateConfig,
 }
 
 impl Default for Config {
@@ -162,8 +162,8 @@ impl Default for Config {
             feeds: Vec::new(),
             feeds_global: FeedsGlobalConfig::default(),
             scan: ScanConfig::default(),
-            access_requests: None,
-            state: None,
+            access_requests: AccessRequestsConfig::default(),
+            state: StateConfig::default(),
         }
     }
 }
@@ -179,9 +179,6 @@ impl<T> std::fmt::Debug for Redacted<T> {
         f.write_str("<redacted>")
     }
 }
-
-/// An untyped v1.1 section kept until its phase types it (A-04).
-pub type RawSection = Redacted<toml::Value>;
 
 /// Maximum accepted config file size (PF-0-06).
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -962,6 +959,20 @@ pub struct AdminConfig {
     pub request_timeout_secs: u64,
     /// Maximum concurrent admin connections.
     pub max_connections: usize,
+    /// Exact `Host` values accepted on every route (DNS-rebinding defense, R-14); empty = the
+    /// loopback names with the listen port.
+    pub allowed_hosts: Vec<String>,
+}
+
+impl AdminConfig {
+    /// The effective `Host` allowlist (lowercase).
+    pub fn hosts(&self) -> Vec<String> {
+        if !self.allowed_hosts.is_empty() {
+            return self.allowed_hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
+        }
+        let p = self.listen.port();
+        vec![format!("127.0.0.1:{p}"), format!("localhost:{p}"), format!("[::1]:{p}")]
+    }
 }
 
 impl Default for AdminConfig {
@@ -975,7 +986,53 @@ impl Default for AdminConfig {
             max_body_bytes: 65536,
             request_timeout_secs: 10,
             max_connections: 64,
+            allowed_hosts: Vec::new(),
         }
+    }
+}
+
+/// `[access_requests]` (D-59).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AccessRequestsConfig {
+    /// Off by default; a profile must also set `access_requests = true`.
+    pub enabled: bool,
+    /// Reserved virtual host answered by the proxy itself.
+    pub virtual_host: String,
+    /// Default temp-allow lifetime.
+    pub default_ttl_secs: u64,
+    /// Longest temp allow (<= 24 h).
+    pub max_ttl_secs: u64,
+    /// Requests per client per hour.
+    pub per_client_per_hour: u32,
+    /// Pending requests per client.
+    pub max_pending_per_client: u32,
+}
+
+impl Default for AccessRequestsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            virtual_host: "webfilter.local".into(),
+            default_ttl_secs: 14_400,
+            max_ttl_secs: 86_400,
+            per_client_per_hour: 3,
+            max_pending_per_client: 20,
+        }
+    }
+}
+
+/// `[state]` (O8): 0700 directory for temp allows, access requests, dashboard versions.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StateConfig {
+    /// Directory.
+    pub dir: PathBuf,
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self { dir: PathBuf::from("state") }
     }
 }
 
@@ -1060,6 +1117,7 @@ impl Config {
             }
         }
         self.scan.temp_dir = r("scan.temp_dir", &self.scan.temp_dir)?;
+        self.state.dir = r("state.dir", &self.state.dir)?;
         if !self.scan.hash_blocklist.as_os_str().is_empty() {
             self.scan.hash_blocklist = r("scan.hash_blocklist", &self.scan.hash_blocklist)?;
         }
@@ -1262,6 +1320,24 @@ impl Config {
                     "address unix:/path or tcp:<loopback>:port; timeout > 0; chunk 1 KiB..1 MiB",
                 ));
             }
+        }
+        let a = &self.access_requests;
+        let vhost_ok = crate::blocklist::parse_domain_entry(&a.virtual_host)
+            .is_ok_and(|(_, h)| h == a.virtual_host.to_ascii_lowercase());
+        if !vhost_ok
+            || a.default_ttl_secs == 0
+            || a.max_ttl_secs > 86_400
+            || a.default_ttl_secs > a.max_ttl_secs
+            || a.per_client_per_hour == 0
+            || a.max_pending_per_client == 0
+        {
+            return Err(invalid(
+                "access_requests",
+                "virtual_host a valid name; 0 < default_ttl <= max_ttl <= 86400; limits > 0",
+            ));
+        }
+        if self.admin.allowed_hosts.iter().any(|h| h.is_empty() || h.contains(['/', '@', ' '])) {
+            return Err(invalid("admin.allowed_hosts", "host[:port] values only"));
         }
         if s.yara.is_some() && !cfg!(feature = "yara") {
             return Err(invalid("scan.yara", "this build lacks the `yara` feature (D-54)"));

@@ -55,16 +55,19 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 h2 = "0.4.20"
+hmac = "0.13.0"
 hex = "0.4.3"
 http = "1.5.0"
 http-body-util = "0.1.5"
 httparse = "1.10.1"
 httpdate = "1.0.3"
-hyper = { version = "1.12.0", features = ["client", "http1", "http2"] }
+hyper = { version = "1.12.0", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 idna = "1.1.0"
 ipnet = "2.12.2"
 moka = { version = "0.12.16", features = ["sync"] }
+crossterm = "0.29.0"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 rcgen = { version = "0.14.10", features = ["x509-parser"] }
 regex = "1.13.1"
 regex-automata = "0.4.18"

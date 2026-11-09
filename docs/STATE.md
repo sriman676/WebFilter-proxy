@@ -6,7 +6,7 @@ Open findings: none Critical/High. Deferred: PF-0-14 (insecure-test sentinel)
 Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`).
 User decisions taken up front: A-24..A-29. Flow: build+test every phase, tag, continue; ALL pentesting at the end,
 then full-codebase redundancy cleanup, then merge to main + v1.1.0 (no push).
-Next action: execute docs/phases/PHASE-11.md. Final order per A-40 (stress test before the pentest). m3-complete after `sudo -E just e2e-netns` with the user. Pending user: docker group (siem-e2e, ClamAV), tool command block, Phase 7 netns sudo
+Next action: CONTINUE Phase 11 on branch phase/11-admin (WIP commit): done = config types (admin.allowed_hosts, [access_requests], [state]), logger admin/access files, src/telemetry.rs, src/access.rs, BlocklistHandle category overrides; todo = wire ProxyDeps (telemetry, access, overrides, evaluate with temp allows), webfilter.local vhost + block-page form, src/admin (hyper server, API, dashboard editing A-30), assets/admin UI, TUI, doctor, tests E-68..E-77, pentest-p11 script. Then Phases 12-14, speed pass, audit, stress test (A-40), pentest, brag video (A-41), merge + v1.1.0. User: rerun netns e2e (E-49 diag), install ffmpeg.
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
