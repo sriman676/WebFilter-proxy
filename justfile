@@ -103,7 +103,7 @@ pentest-p9:
 pentest-p10:
     scripts/pentest_p10.sh
 pentest-p11:
-    @echo "TODO: pentest-p11 lands in Phase 11 (PENTEST_PLAN_EXT PT-11.x)" >&2; exit 1
+    scripts/pentest_p11.sh
 pentest-p12:
     @echo "TODO: pentest-p12 lands in Phase 12 (PENTEST_PLAN_EXT PT-12.x)" >&2; exit 1
 pentest-p13:
@@ -130,7 +130,7 @@ feeds-test:
 scan-e2e:
     scripts/scan_e2e.sh
 promtool:
-    @echo "TODO: promtool lands in Phase 11 (metrics format, D-56)" >&2; exit 1
+    scripts/promtool.sh
 ui-lint:
     python3 scripts/ui_lint.py
 ui-e2e:

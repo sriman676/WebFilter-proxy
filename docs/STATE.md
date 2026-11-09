@@ -1,12 +1,12 @@
 # Project State (update at every gate; first file read when resuming)
-Current phase: 11 (not started)
+Current phase: 12 (not started)
 Milestone tags: m1-complete, m2-complete
-Last green commit: phase-10-complete (pentests deferred to the final consolidated run, A-29)
+Last green commit: phase-11-complete
 Open findings: none Critical/High. Deferred: PF-0-14 (insecure-test sentinel)
 Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`).
 User decisions taken up front: A-24..A-29. Flow: build+test every phase, tag, continue; ALL pentesting at the end,
 then full-codebase redundancy cleanup, then merge to main + v1.1.0 (no push).
-Next action: CONTINUE Phase 11 on branch phase/11-admin (WIP commit): done = config types (admin.allowed_hosts, [access_requests], [state]), logger admin/access files, src/telemetry.rs, src/access.rs, BlocklistHandle category overrides; todo = wire ProxyDeps (telemetry, access, overrides, evaluate with temp allows), webfilter.local vhost + block-page form, src/admin (hyper server, API, dashboard editing A-30), assets/admin UI, TUI, doctor, tests E-68..E-77, pentest-p11 script. Then Phases 12-14, speed pass, audit, stress test (A-40), pentest, brag video (A-41), merge + v1.1.0. User: rerun netns e2e (E-49 diag), install ffmpeg.
+Next action: execute docs/phases/PHASE-12.md. Then 13, 14, speed pass, audit, stress test (A-40), pentest, brag video (A-41), merge + v1.1.0. User: rerun netns e2e, install ffmpeg.
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
@@ -21,6 +21,6 @@ Next action: CONTINUE Phase 11 on branch phase/11-admin (WIP commit): done = con
 | 8 | done | 2026-10-31 | phase-8-complete | load/compat/release-audit PASS; PF-8-01 fixed; m3/m4 tags after netns + consolidated pentest |
 | 9 | done | 2026-10-31 | phase-9-complete | 240 tests, cov 92.3%; PF-9-01 fixed; pentest deferred (A-29) |
 | 10 | done | 2026-11-09 | phase-10-complete | 253 tests (+YARA), cov 87.9%; real ClamAV, siem-e2e, h2spec PASS; netns rerun pending (E-49 diag, PT-7.8 fixed) |
-| 11 | todo | | | |
+| 11 | done | 2026-11-09 | phase-11-complete | 262 tests, cov 84.7%; promtool PASS; dashboard checked in Chrome; PF-11-01 fixed; pentest deferred (A-29) |
 | 12 | todo | | | |
 | 13 | todo | | | |

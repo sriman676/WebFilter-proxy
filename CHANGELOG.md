@@ -2,6 +2,19 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-11-complete] - 2026-11-09 - Phase 11: operations, admin, dashboard, access requests (pentest in the final run, A-29)
+### Added
+- Admin listener (loopback, off by default): Host allowlist on every route, Bearer token with lockout, Origin
+  checks, security headers, audit log; `/healthz`, `/readyz`, `/metrics` (promtool-clean), `/api/v1/*`.
+- Rich web dashboard (`assets/admin/`, vanilla JS, strict CSP): overview with live charts, events with search,
+  top blocked, clients, feeds, scans, access requests, temp allows, audit, and safeguarded editing of lists,
+  categories/schedules, allowlist and mode with versions and one-click rollback (A-30).
+- Access requests: block-page form with HMAC CSRF, reserved `webfilter.local` host, rate limits, temp allows
+  scoped to client or profile (never over feeds, scans or safety policy).
+- `webfilter-proxy tui` (ratatui) and `webfilter-proxy doctor`; `just promtool`, `just pentest-p11`.
+### Fixed
+- PF-11-01: Host with a trailing dot refused.
+
 ## [phase-10-complete] - 2026-11-09 - Phase 10: threat feeds, download hashing and scanning (pentest in the final run, A-29)
 ### Added
 - `feeds` (D-52): verified HTTPS fetch with destination policy, caps, conditional GET, backoff; per-format

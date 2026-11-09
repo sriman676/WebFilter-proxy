@@ -43,7 +43,7 @@ fn invalid(key: &str, reason: impl Into<String>) -> ConfigError {
 }
 
 /// Enforcement mode (D-33).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Block matching requests.

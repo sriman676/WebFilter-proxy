@@ -4,10 +4,12 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod admin;
 pub mod auth;
 pub mod blocklist;
 pub mod client;
 pub mod config;
+pub mod doctor;
 pub mod feeds;
 pub mod filter;
 pub mod limiter;
@@ -22,3 +24,4 @@ pub mod scan;
 pub mod schedule;
 pub mod telemetry;
 pub mod tls;
+pub mod tui;

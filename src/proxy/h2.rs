@@ -175,6 +175,7 @@ where
 /// GOAWAY(ENHANCE_YOUR_CALM) was sent: system event + stats counter (D-45).
 fn flood_event(deps: &ProxyDeps, v: Violation, side: &str, guard: &GuardState) {
     deps.stats.record_h2_flood();
+    deps.telemetry.h2_flood(v.as_str());
     deps.logger.system().event(
         SysEvent::H2Flood,
         serde_json::json!({
@@ -322,8 +323,8 @@ async fn send_block(
     d: &crate::filter::Decision,
     deps: &ProxyDeps,
 ) {
-    let html = block_html(ev, d, deps);
-    let _ = send_page(respond, 403, d.reason, &ev.event_id, html, &[]);
+    let (html, extra) = block_html(ev, d, deps);
+    let _ = send_page(respond, 403, d.reason, &ev.event_id, html, &extra);
     ev.status = 403;
 }
 
@@ -352,13 +353,13 @@ async fn exchange(
             return Ok(());
         }
     };
-    let d = deps.evaluate(&t, Phase::PreDns, profile);
+    let d = deps.evaluate(&t, Phase::PreDns, profile, &c.tunnel.client_id);
     note_decision(ev, &d);
     if d.is_block() {
         send_block(respond, ev, &d, deps).await;
         return Ok(());
     }
-    if let Some(d) = resolved_rule(deps, &t, &c.tunnel.ips, profile) {
+    if let Some(d) = resolved_rule(deps, &t, &c.tunnel.ips, profile, &c.tunnel.client_id) {
         note_decision(ev, &d);
         if d.is_block() {
             send_block(respond, ev, &d, deps).await;
@@ -401,7 +402,7 @@ async fn exchange(
     ev.http_content_type =
         content_type.as_deref().map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
     let phase = Phase::ResponseHeaders { content_type: content_type.as_deref() };
-    let d = deps.evaluate(&t, phase, profile);
+    let d = deps.evaluate(&t, phase, profile, &c.tunnel.client_id);
     if d.reason != Reason::None {
         note_decision(ev, &d);
     }
