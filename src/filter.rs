@@ -86,7 +86,8 @@ impl Decision {
         }
     }
 
-    fn block(mode: Mode, reason: Reason, rule_id: String, list: &str) -> Self {
+    /// A block (or a would-block in monitor mode) by `rule_id` from `list`.
+    pub fn block(mode: Mode, reason: Reason, rule_id: String, list: &str) -> Self {
         let monitor = mode == Mode::Monitor;
         Self {
             action: if monitor { Action::Allow } else { Action::Block },

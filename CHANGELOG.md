@@ -2,6 +2,19 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-10-complete] - 2026-11-09 - Phase 10: threat feeds, download hashing and scanning (pentest in the final run, A-29)
+### Added
+- `feeds` (D-52): verified HTTPS fetch with destination policy, caps, conditional GET, backoff; per-format
+  parsers with poisoning guards; versioned store (5 kept), rollback, expiry; `feeds status|update|rollback|test`;
+  matching in rules 2/3/4 per profile.
+- `scan` (D-53/D-54): eligibility by extension/type/magic; detect and block modes on HTTP/1 and intercepted h2;
+  0600 temp files with quota and concurrency caps; hash blocklist (hot reload); clamd INSTREAM; YARA via
+  `yara-x` (feature `yara`); `scan_*`/`body_*`/`download_name` log fields; `malware_detected` events.
+- `just scan-e2e` (pinned ClamAV container), `just feeds-test`, `just pentest-p10`; fuzz F-14/F-15/F-16.
+- `just h2spec` now uses an h2 mode of the loadgen origin (147/147 strict); live `siem-e2e` passed.
+### Fixed
+- PF-10-01 feed `*.` form lost; PF-10-02 version-name reuse; PF-10-03 shipped config enabled v1.1 limits.
+
 ## [phase-9-complete] - 2026-10-31 - Phase 9: identity, profiles, rate limits, quotas (pentest in the final run, A-29)
 ### Added
 - `[[users]]`, `[[clients]]`, `[[profiles]]` (D-50): per-request `client_id`, longest-prefix CIDR profiles,

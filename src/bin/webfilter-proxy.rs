@@ -55,6 +55,11 @@ enum Command {
         #[command(subcommand)]
         command: CaCommand,
     },
+    /// Threat feeds (SPEC_EXT_POLICY P3).
+    Feeds {
+        #[command(subcommand)]
+        command: FeedsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -63,6 +68,119 @@ enum CaCommand {
     Generate,
     /// Print the public CA certificate (PEM) to import into a browser (manual, D-30).
     Export,
+}
+
+#[derive(Subcommand)]
+enum FeedsCommand {
+    /// Active version, entries and last success of every feed.
+    Status,
+    /// Fetch and apply one feed (or all enabled feeds).
+    Update {
+        /// Feed name; all enabled feeds when omitted.
+        name: Option<String>,
+        /// Skip the 50-200 percent sanity guard.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Restore the previous version of a feed.
+    Rollback {
+        /// Feed name.
+        name: String,
+    },
+    /// Show which active feed entry (if any) a URL hits.
+    Test {
+        /// Absolute http(s) URL.
+        url: String,
+    },
+}
+
+fn feeds(cfg: &Config, command: &FeedsCommand) -> ExitCode {
+    let roots: Vec<_> = Some(&cfg.tls.upstream_ca_bundle)
+        .filter(|p| !p.as_os_str().is_empty())
+        .cloned()
+        .into_iter()
+        .collect();
+    let tls = match webfilter::tls::upstream_client_config(&roots) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let fetcher = webfilter::feeds::Fetcher {
+        tls,
+        resolver: std::sync::Arc::new(webfilter::policy::SystemResolver),
+        policy: webfilter::policy::DestPolicy::new(true, Vec::new()),
+    };
+    let mgr = webfilter::feeds::FeedManager::new(
+        cfg.feeds.clone(),
+        cfg.feeds_global.dir.clone(),
+        cfg.feeds_global.protected_domains.clone(),
+        Some(fetcher),
+        None,
+    );
+    let print_err = |e: &dyn std::fmt::Display| {
+        eprintln!("error: {e}");
+        ExitCode::FAILURE
+    };
+    match command {
+        FeedsCommand::Status => {
+            for s in mgr.status() {
+                println!("{}", serde_json::to_string(&s).unwrap_or_default());
+            }
+            ExitCode::SUCCESS
+        }
+        FeedsCommand::Update { name, force } => {
+            let names: Vec<String> = match name {
+                Some(n) => vec![n.clone()],
+                None => cfg.feeds.iter().filter(|f| f.enabled).map(|f| f.name.clone()).collect(),
+            };
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => return print_err(&e),
+            };
+            let mut code = ExitCode::SUCCESS;
+            for n in names {
+                match rt.block_on(mgr.update(&n, *force)) {
+                    Ok(u) => println!("{n}: {u:?}"),
+                    Err(e) => {
+                        eprintln!("{n}: {e}");
+                        code = ExitCode::FAILURE;
+                    }
+                }
+            }
+            code
+        }
+        FeedsCommand::Rollback { name } => match mgr.rollback(name) {
+            Ok(v) => {
+                println!("{name}: active version is now {v}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => print_err(&e),
+        },
+        FeedsCommand::Test { url } => {
+            let t = match webfilter::normalize::canonicalize(
+                url,
+                webfilter::normalize::TargetContext::PlainAbsolute,
+            ) {
+                Ok(t) => t,
+                Err(e) => return print_err(&e),
+            };
+            let names: Vec<String> = cfg.feeds.iter().map(|f| f.name.clone()).collect();
+            match mgr.check(
+                &t,
+                webfilter::filter::Phase::PreDns,
+                &names,
+                webfilter::config::Mode::Enforce,
+            ) {
+                Some(d) => {
+                    println!("BLOCK {} ({})", d.rule_id.unwrap_or_default(), d.reason.as_str())
+                }
+                None => println!("no feed entry matches {}", t.url_norm),
+            }
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 fn ca(cfg: &Config, command: &CaCommand) -> ExitCode {
@@ -217,6 +335,9 @@ fn main() -> ExitCode {
     match &cli.command {
         Some(Command::HashPassword) => hash_password(),
         Some(Command::Ca { command }) => load(&cli).map_or_else(|code| code, |c| ca(&c, command)),
+        Some(Command::Feeds { command }) => {
+            load(&cli).map_or_else(|code| code, |c| feeds(&c, command))
+        }
         Some(Command::CheckConfig) => match load(&cli) {
             Ok(c) => {
                 println!("config OK: {} (listen {})", cli.config.display(), c.listen);

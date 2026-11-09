@@ -34,3 +34,4 @@ feeds/
 lcov.info
 .claude/settings.local.json
 /webfilter.cdx.json
+brag-output*/

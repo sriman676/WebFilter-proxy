@@ -1,12 +1,12 @@
 # Project State (update at every gate; first file read when resuming)
-Current phase: 10 (not started)
+Current phase: 11 (not started)
 Milestone tags: m1-complete, m2-complete
-Last green commit: phase-9-complete (pentests deferred to the final consolidated run, A-29)
+Last green commit: phase-10-complete (pentests deferred to the final consolidated run, A-29)
 Open findings: none Critical/High. Deferred: PF-0-14 (insecure-test sentinel)
 Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`).
 User decisions taken up front: A-24..A-29. Flow: build+test every phase, tag, continue; ALL pentesting at the end,
 then full-codebase redundancy cleanup, then merge to main + v1.1.0 (no push).
-Next action: execute docs/phases/PHASE-10.md. Final order per A-40 (stress test before the pentest). m3-complete after `sudo -E just e2e-netns` with the user. Pending user: docker group (siem-e2e, ClamAV), tool command block, Phase 7 netns sudo
+Next action: execute docs/phases/PHASE-11.md. Final order per A-40 (stress test before the pentest). m3-complete after `sudo -E just e2e-netns` with the user. Pending user: docker group (siem-e2e, ClamAV), tool command block, Phase 7 netns sudo
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Next action: execute docs/phases/PHASE-10.md. Final order per A-40 (stress test 
 | 7 | done | 2026-10-31 | phase-7-complete | 227 tests, cov 92.6%, PF-7-01 fixed; netns e2e pending sudo (A-28); pentest deferred (A-29) |
 | 8 | done | 2026-10-31 | phase-8-complete | load/compat/release-audit PASS; PF-8-01 fixed; m3/m4 tags after netns + consolidated pentest |
 | 9 | done | 2026-10-31 | phase-9-complete | 240 tests, cov 92.3%; PF-9-01 fixed; pentest deferred (A-29) |
-| 10 | todo | | | |
+| 10 | done | 2026-11-09 | phase-10-complete | 253 tests (+YARA), cov 87.9%; real ClamAV, siem-e2e, h2spec PASS; netns rerun pending (E-49 diag, PT-7.8 fixed) |
 | 11 | todo | | | |
 | 12 | todo | | | |
 | 13 | todo | | | |
