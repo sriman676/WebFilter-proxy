@@ -160,8 +160,8 @@ The threat model (docs/THREAT_MODEL.md, STRIDE, 76 threats) maps every threat to
 
 | Kind | Evidence |
 |---|---|
-| Unit, integration and end-to-end tests | ⟨final⟩ tests (all passing), driving the real binaries |
-| Coverage | ⟨final⟩ % line coverage (gate passes) |
+| Unit, integration and end-to-end tests | 340 tests (332 + 8 plugin tests) and 5 doc tests, all passing; end-to-end tests drive the real binaries |
+| Coverage | 87.3 % line coverage (per-module gates pass) |
 | Fuzzing | 22 libFuzzer targets (parsers, rewriters, robots, plugins); findings fixed with regression tests |
 | Differential testing | own HTTP/1 parser vs `httparse`, URL normalizer vs WHATWG |
 | HTTP/2 conformance | h2spec 147/147 |
@@ -180,7 +180,7 @@ Loopback measurements (WSL2, release build):
 | Intercepted HTTPS (new TLS on both sides) | 13,741 req/s | >= 500 req/s |
 | Memory at 1,000 concurrent connections | 36 MB | < 200 MB |
 | Overhead with profiles, limits and metrics on | 0.2-2.1 % | <= 10 % |
-| Stress test (A-40) | ⟨final⟩ | no crash, bounded memory, recovery |
+| Stress test (A-40) | 42/42 checks: 1.88 M requests in 120 s with 0 errors, slowloris, 200 MiB bodies, HTTP/2 floods, 10,000 clients, chaos; RSS flat (55.7 -> 56.2 MB) | no crash, bounded memory, recovery |
 
 Profiling (perf flamegraphs) shows time spread over socket I/O, the runtime and logging, and TLS handshake
 cryptography for interception; no single hot spot.
@@ -188,7 +188,9 @@ cryptography for interception; no single hot spot.
 ## 10. Penetration testing
 
 Every phase has a pentest plan (PT-x.y cases, 100+ cases across 14 phases) run in a consolidated final pentest,
-plus independent adversarial code reviews. ⟨final summary: cases, findings by severity, all fixed⟩. Every
+plus three independent adversarial code reviews and one consolidated automated pentest of the whole codebase
+(supply chain, static analysis, every test, release audit, UI checks, all 22 fuzz targets). Result: 45 findings
+in total - 0 Critical, 0 High, 16 Medium, 29 Low - all fixed (`docs/pentest/final/FINAL_REPORT.md`). Every
 finding received a regression test before its fix; reports are in `docs/pentest/`.
 
 ## 11. How to run

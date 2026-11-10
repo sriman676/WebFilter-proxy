@@ -13,10 +13,11 @@
 <p align="center">
   <img alt="Rust 1.99 (edition 2024)" src="https://img.shields.io/badge/rust-1.99%20%C2%B7%202024-orange?logo=rust">
   <img alt="unsafe forbidden" src="https://img.shields.io/badge/unsafe-forbidden-success">
-  <img alt="324 tests passing" src="https://img.shields.io/badge/tests-324%20passing-brightgreen">
+  <img alt="340 tests passing" src="https://img.shields.io/badge/tests-340%20passing-brightgreen">
   <img alt="22 fuzz targets" src="https://img.shields.io/badge/fuzz-22%20targets-blue">
   <img alt="h2spec 147/147" src="https://img.shields.io/badge/h2spec-147%2F147-brightgreen">
   <img alt="17,764 requests per second" src="https://img.shields.io/badge/throughput-17.7k%20req%2Fs-blueviolet">
+  <img alt="coverage 87%" src="https://img.shields.io/badge/coverage-87%25-brightgreen">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 

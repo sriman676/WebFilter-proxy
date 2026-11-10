@@ -1,12 +1,12 @@
 # Project State (update at every gate; first file read when resuming)
-Current phase: end sequence (review fixes, speed pass, audit, stress, pentest, submission)
+Current phase: done - v1.1.0 released
 Milestone tags: m1-complete, m2-complete
-Last green commit: phase-14-complete
-Open findings: none Critical/High. Deferred: PF-0-14 (insecure-test sentinel)
+Last green commit: v1.1.0
+Open findings: none (45 found in the final pentest and reviews, all fixed; docs/pentest/final/FINAL_REPORT.md). Deferred: PF-0-14 (insecure-test sentinel)
 Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`).
 User decisions taken up front: A-24..A-29. Flow: build+test every phase, tag, continue; ALL pentesting at the end,
 then full-codebase redundancy cleanup, then merge to main + v1.1.0 (no push).
-Next action: merge review-fix branches (M1-M4, L1-L8), then speed pass, redundancy audit, stress test (scripts/stress.sh, A-40), consolidated pentest (pentest-p1..p14, m3/m4/m5 tags), then README + REPORT + brag video (A-41), merge to main + v1.1.0, user pushes to a private GitHub repo. User: rerun netns e2e, install ffmpeg, create the repo.
+Next action: none required. User-side: rerun the netns e2e (E-49 diagnostics) with sudo; push to the private GitHub repo.
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
