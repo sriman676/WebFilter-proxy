@@ -705,11 +705,9 @@ async fn rv3_m4_malformed_and_oversized_credentials_are_not_counted() {
 async fn rv3_l4_lockout_event_caps_the_user_name() {
     let hash = webfilter::auth::hash_password(b"pw").unwrap();
     let name = "a".repeat(100);
-    let mut p = proxy(
-        &format!("[proxy_auth]\nusername = \"{name}\"\npassword_hash = \"{hash}\"\n"),
-        &[],
-    )
-    .await;
+    let mut p =
+        proxy(&format!("[proxy_auth]\nusername = \"{name}\"\npassword_hash = \"{hash}\"\n"), &[])
+            .await;
     let cred = basic(&format!("{name}:wrong"));
     let req = format!(
         "GET http://good.test:1/ HTTP/1.1\r\nHost: good.test:1\r\nProxy-Authorization: Basic {cred}\r\nConnection: close\r\n\r\n"
