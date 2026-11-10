@@ -363,3 +363,70 @@ fn rv2_l4_site_local_is_private() {
         assert_eq!(!is_private(ip(a)), public, "{a}");
     }
 }
+
+/// RV3-M3: attacker-chosen unknown names share one counter; a known user is locked per client
+/// network only, so failures from network A never lock the user out from network B.
+#[test]
+fn rv3_m3_user_lockout_bounded_and_per_client_network() {
+    use webfilter::auth::{UNKNOWN_USER, user_key};
+    let l: Lockout<(String, IpAddr)> = Lockout::default();
+    let (a, b, t0) = (ip("192.0.2.1"), ip("198.51.100.7"), Instant::now());
+    let long = "n".repeat(40 * 1024);
+    for i in 0..1_000 {
+        l.record_failure(user_key(&format!("{long}{i}"), false, a), t0);
+    }
+    assert_eq!(l.tracked(), 1, "every unknown name shares one key");
+    assert!(l.is_locked(user_key("whatever", false, a), t0));
+    assert_eq!(user_key("x", false, a).0, UNKNOWN_USER);
+
+    let users: Lockout<(String, IpAddr)> = Lockout::default();
+    for _ in 0..MAX_FAILURES {
+        users.record_failure(user_key("alice", true, a), t0);
+    }
+    assert!(users.is_locked(user_key("alice", true, a), t0), "alice locked from A");
+    assert!(!users.is_locked(user_key("alice", true, b), t0), "alice still usable from B");
+    let v6 = Lockout::<(String, IpAddr)>::default();
+    for i in 0..MAX_FAILURES {
+        v6.record_failure(user_key("alice", true, ip(&format!("2001:db8:1:2::{i:x}"))), t0);
+    }
+    assert!(v6.is_locked(user_key("alice", true, ip("2001:db8:1:2::ffff")), t0), "same /64");
+    assert!(!v6.is_locked(user_key("alice", true, ip("2001:db8:1:3::1")), t0), "other /64");
+}
+
+/// RV3-M4: the active-lockout check for a new client is O(log n), and partial counters from many
+/// networks never make a newcomer fail closed.
+#[test]
+fn rv3_m4_many_partial_counters_never_lock_a_new_client() {
+    let l = Lockout::default();
+    let t0 = Instant::now();
+    for i in 0..webfilter::auth::MAX_TRACKED as u32 {
+        l.record_failure(IpAddr::from((0x0a00_0000u32 + i).to_be_bytes()), t0);
+    }
+    let newcomer = ip("192.0.2.200");
+    let start = Instant::now();
+    for _ in 0..10_000 {
+        assert!(!l.is_locked(newcomer, t0), "partial counters never fail closed");
+    }
+    assert!(start.elapsed() < Duration::from_secs(2), "no full-table scan per check");
+    assert!(!l.record_failure(newcomer, t0), "a newcomer can still be counted");
+    assert!(l.tracked() <= webfilter::auth::MAX_TRACKED);
+}
+
+/// RV3-L1: failures decay; one every 15 s (at most 4 per 60 s window) never locks, while 5
+/// within 60 s still do.
+#[test]
+fn rv3_l1_failures_outside_the_window_decay() {
+    let l = Lockout::default();
+    let (a, t0) = (ip("192.0.2.9"), Instant::now());
+    for i in 0..20u64 {
+        let at = t0 + Duration::from_secs(15 * i);
+        assert!(!l.record_failure(a, at), "failure {i} spread out must not lock");
+        assert!(!l.is_locked(a, at));
+    }
+    let b = ip("192.0.2.10");
+    for i in 0..MAX_FAILURES - 1 {
+        assert!(!l.record_failure(b, t0 + Duration::from_secs(u64::from(i))));
+    }
+    assert!(l.record_failure(b, t0 + Duration::from_secs(59)), "5 within 60 s still lock");
+    assert!(l.is_locked(b, t0 + Duration::from_secs(60)));
+}

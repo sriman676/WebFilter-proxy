@@ -16,14 +16,20 @@ use crate::normalize::fold_ip;
 /// Name of the profile that always exists.
 pub const DEFAULT_PROFILE: &str = "default";
 
+/// The client network a source address belongs to: IPv4 (IPv4-mapped IPv6 folded) or the IPv6
+/// /64. Lockouts, limits and the per-IP connection cap all key by it (PF-1-05, D-50, RV3-L3).
+pub fn client_net(peer: IpAddr) -> IpAddr {
+    match fold_ip(peer) {
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !((1u128 << 64) - 1)).into()),
+        v4 => v4,
+    }
+}
+
 /// `user:<name>` or `ip:<addr>` (IPv4-mapped folded; other IPv6 as its /64), never from headers.
 pub fn client_id(peer: IpAddr, user: Option<&str>) -> String {
-    match (user, fold_ip(peer)) {
+    match (user, client_net(peer)) {
         (Some(u), _) => format!("user:{u}"),
-        (None, IpAddr::V6(v6)) => {
-            let net = std::net::Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1));
-            format!("ip:{net}/64")
-        }
+        (None, IpAddr::V6(net)) => format!("ip:{net}/64"),
         (None, v4) => format!("ip:{v4}"),
     }
 }
