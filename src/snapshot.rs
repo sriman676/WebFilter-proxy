@@ -323,6 +323,7 @@ pub fn rewrite(
                         el.get_attribute("src").as_deref().and_then(local).unwrap_or_default();
                     el.set_attribute("src", &src)?;
                 } else {
+                    el.before(" ", ContentType::Text); // `<` + text must not join (PF-F-01)
                     el.remove();
                 }
                 Ok(())
@@ -339,12 +340,14 @@ pub fn rewrite(
                             .get_attribute("http-equiv")
                             .is_some_and(|v| v.eq_ignore_ascii_case("content-security-policy"))
                     {
+                        el.before(" ", ContentType::Text); // `<` + text must not join (PF-F-01)
                         el.remove();
                     }
                     Ok(())
                 }
             ))
             .append_element_content_handler(element!("iframe, frame, frameset", |el| {
+                el.before(" ", ContentType::Text);
                 el.replace(
                     "<span class=\"wf-removed\">[embedded frame removed]</span>",
                     ContentType::Html,
@@ -380,6 +383,7 @@ pub fn rewrite(
                         || !n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
                 });
                 if unsafe_left {
+                    el.before(" ", ContentType::Text);
                     el.remove_and_keep_content();
                     return Ok(());
                 }
@@ -399,6 +403,7 @@ pub fn rewrite(
                         _ => "src",
                     };
                     if tag == "link" && !(rel.contains("stylesheet") || rel.contains("icon")) {
+                        el.before(" ", ContentType::Text); // `<` + text must not join (PF-F-01)
                         el.remove(); // preload, prefetch, manifest...: no network references
                         return Ok(());
                     }
