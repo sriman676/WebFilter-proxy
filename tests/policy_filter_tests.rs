@@ -122,7 +122,7 @@ fn destination_validates_every_resolved_address() {
         map: HashMap::from([
             (
                 "good.test".to_owned(),
-                vec![ip("93.184.216.34"), ip("93.184.216.34"), ip("2606:4700::1111")],
+                vec![ip("93.184.216.34"), ip("93.184.216.34"), ip("2001:db8::1")],
             ),
             ("mixed.test".to_owned(), vec![ip("93.184.216.34"), ip("10.0.0.1")]),
             ("meta.test".to_owned(), vec![ip("169.254.169.254")]),
@@ -132,7 +132,7 @@ fn destination_validates_every_resolved_address() {
     let p = DestPolicy::new(true, vec![]);
     assert_eq!(
         block_on(check_destination(&target("http://good.test/"), &r, &p)),
-        PolicyVerdict::Allow(vec![ip("93.184.216.34"), ip("2606:4700::1111")]),
+        PolicyVerdict::Allow(vec![ip("93.184.216.34"), ip("2001:db8::1")]),
         "deduplicated, order kept"
     );
     assert_eq!(
@@ -348,26 +348,18 @@ async fn static_resolver_parses_spec_and_is_off_without_env() {
     }
 }
 
-/// Review 2 L4: site-local and documentation ranges are private destinations.
+/// Review 2 L4: the deprecated site-local range is private. Documentation ranges (TEST-NETs,
+/// 2001:db8::/32) are not internal networks and the netns lab uses them as origins (A-49).
 #[test]
-fn rv2_l4_site_local_and_documentation_ranges_are_private() {
+fn rv2_l4_site_local_is_private() {
     use webfilter::policy::is_private;
     let p = DestPolicy::new(true, vec![]);
-    for a in [
-        "fec0::1",
-        "feff:ffff::1",
-        "2001:db8::1",
-        "2001:db8:ffff::1",
-        "192.0.2.1",
-        "198.51.100.200",
-        "203.0.113.7",
-        "::ffff:203.0.113.7",
-    ] {
+    for a in ["fec0::1", "feff:ffff::1", "::ffff:10.0.0.1"] {
         assert!(is_private(ip(a)), "{a}");
         assert_eq!(p.check_ip(ip(a), 80), Err(Reason::PrivateRange), "{a}");
     }
-    for a in ["192.0.3.1", "198.51.101.1", "203.0.114.1", "2001:db9::1", "2001:4860::8888"] {
-        assert!(!is_private(ip(a)), "{a} is public");
-        assert!(p.check_ip(ip(a), 80).is_ok(), "{a}");
+    for a in ["2001:db8::1", "192.0.2.1", "2001:4860::8888", "ff00::1"] {
+        let public = a != "ff00::1";
+        assert_eq!(!is_private(ip(a)), public, "{a}");
     }
 }

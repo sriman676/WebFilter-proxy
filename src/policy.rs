@@ -79,7 +79,6 @@ pub fn is_private(ip: IpAddr) -> bool {
                 || (a, b, c) == (192, 0, 0) // IETF protocol assignments 192.0.0/24
                 || a >= 240 // reserved 240/4 incl. broadcast
                 || (a == 198 && (b & 0xfe) == 18) // benchmarking 198.18/15
-                || matches!((a, b, c), (192, 0, 2) | (198, 51, 100) | (203, 0, 113)) // TEST-NETs
         }
         IpAddr::V6(v6) => {
             let [s0, s1, s2, ..] = v6.segments();
@@ -89,7 +88,6 @@ pub fn is_private(ip: IpAddr) -> bool {
                 || (s0 & 0xffc0) == 0xfe80 // link-local
                 || (s0 & 0xfe00) == 0xfc00 // ULA
                 || (s0 & 0xffc0) == 0xfec0 // deprecated site-local fec0::/10
-                || (s0, s1) == (0x2001, 0xdb8) // documentation 2001:db8::/32
                 || (s0, s1, s2) == (0x64, 0xff9b, 1) // NAT64 local-use 64:ff9b:1::/48
                 || embedded_ipv4(v6).is_some_and(|v4| is_private(IpAddr::V4(v4)))
         }
