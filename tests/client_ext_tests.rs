@@ -188,6 +188,11 @@ fn sh_snapshot_corpus() {
     // Fuzz regressions (F-19, F-20).
     let (_, o) = snap("<p>x</p><<<<0<script<");
     assert!(!o.contains("<script"), "F-19 trailing unterminated tag: {o}");
+    // Consolidated-pentest fuzz find (PF-F-01): an `on` attribute whose name holds a NUL could not
+    // be removed and survived; such elements are now dropped (content kept).
+    let (_, o) = snap("style\u{fffd}\u{fffd})<V\0\n\u{feff}on\0>text");
+    assert!(!o.contains("on\0") && !o.contains("\u{feff}on"), "PF-F-01: {o:?}");
+    assert!(o.contains("text"), "content kept: {o:?}");
     for css in [
         "u<rl(http://evil.example/x.png)",
         "expressio<n(1)",

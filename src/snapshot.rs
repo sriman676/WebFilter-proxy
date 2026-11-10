@@ -372,6 +372,17 @@ pub fn rewrite(
                 if el.tag_name() == "form" {
                     el.remove_attribute("action");
                 }
+                // An attribute that cannot be removed (e.g. a NUL in its name) or has a name
+                // outside the safe set takes its element with it; the content is kept (PF-F-01).
+                let unsafe_left = el.attributes().iter().any(|a| {
+                    let n = a.name();
+                    n.starts_with("on")
+                        || !n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
+                });
+                if unsafe_left {
+                    el.remove_and_keep_content();
+                    return Ok(());
+                }
                 if let Some(s) = el.get_attribute("style") {
                     el.set_attribute("style", &rewrite_css(&s, &css_map))?;
                 }
