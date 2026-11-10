@@ -268,6 +268,41 @@ async fn metrics_and_read_api() {
     h.stop().await;
 }
 
+/// RV2-M1 (D-18): the recent-events view is sanitized like the JSON log: no query values, capped
+/// User-Agent.
+#[tokio::test]
+async fn rv2_m1_recent_events_never_expose_query_values() {
+    let origin = Origin::start(|_| Reply::ok("hi")).await;
+    let (mut h, a) = lab("", &[("domains.txt", "bad.test\n")]).await;
+    let port = origin.addr.port();
+    let ua = "U".repeat(10 * 1024);
+    for host in ["bad.test", "ok.test"] {
+        h.raw(
+            format!(
+                "GET http://{host}:{port}/?token=CANARYSECRET HTTP/1.1\r\nHost: {host}:{port}\r\n\
+User-Agent: {ua}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+            W,
+        )
+        .await;
+    }
+    let (st, ev) = api(a, "GET", "events/recent?limit=10", "").await;
+    assert_eq!(st, 200);
+    let events = ev.as_array().unwrap();
+    assert_eq!(events.len(), 2, "{ev}");
+    let text = ev.to_string();
+    assert!(!text.contains("CANARYSECRET"), "query value leaked: {text}");
+    for e in events {
+        assert!(e["uri_query_keys"].as_array().unwrap().iter().any(|k| k == "token"), "{e}");
+        let agent = e["user_agent"].as_str().unwrap();
+        assert!(agent.chars().count() <= 512, "user agent capped: {}", agent.len());
+    }
+    h.stop().await;
+    let log = std::fs::read_to_string(h.lab.path().join("logs/webfilter.jsonl")).unwrap();
+    assert!(!log.contains("CANARYSECRET"));
+}
+
 #[tokio::test]
 async fn dashboard_edits_are_validated_versioned_audited_and_reversible() {
     let origin = Origin::start(|_| Reply::ok("hi")).await;

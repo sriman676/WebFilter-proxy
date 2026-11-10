@@ -401,7 +401,7 @@ pub struct Slot {
     file: Option<std::fs::File>,
     path: PathBuf,
     hasher: Sha256,
-    /// Bytes seen (also past the recording cap).
+    /// Bytes stored (and hashed); never includes bytes past the recording cap (RV2-L5).
     pub bytes: u64,
     max: u64,
     quota: u64,
@@ -414,14 +414,13 @@ pub struct Slot {
 impl Slot {
     /// Record a decoded body chunk. Past `max_bytes` or the temp quota recording stops and the
     /// download becomes unscannable; `Err` tells block mode to stop buffering.
+    /// Size and hash cover only stored chunks; a rejected chunk is left to the caller whole.
     pub fn write(&mut self, chunk: &[u8]) -> Result<(), &'static str> {
-        self.hasher.update(chunk);
-        self.bytes = self.bytes.saturating_add(chunk.len() as u64);
         if self.stopped.is_some() {
             return Err("stopped");
         }
         let n = chunk.len() as u64;
-        let why = if self.bytes > self.max {
+        let why = if self.bytes.saturating_add(n) > self.max {
             Some("larger than scan.max_bytes")
         } else if self.used.fetch_add(n, Ordering::Relaxed).saturating_add(n) > self.quota {
             self.used.fetch_sub(n, Ordering::Relaxed);
@@ -429,8 +428,19 @@ impl Slot {
         } else {
             self.reserved += n;
             match self.file.as_mut().map(|f| f.write_all(chunk)) {
-                Some(Ok(())) => None,
-                _ => Some("scan temp file write failed"),
+                Some(Ok(())) => {
+                    self.hasher.update(chunk);
+                    self.bytes = self.bytes.saturating_add(n);
+                    None
+                }
+                _ => {
+                    // A partial write may have left part of `chunk` in the file: cut it back
+                    // (delivery also reads at most `bytes`, so nothing is ever sent twice).
+                    if let Some(f) = self.file.as_mut() {
+                        let _ = f.set_len(self.bytes);
+                    }
+                    Some("scan temp file write failed")
+                }
             }
         };
         match why {
@@ -458,7 +468,7 @@ impl Slot {
         dst: &mut W,
         idle: Duration,
     ) -> std::io::Result<u64> {
-        let mut f = tokio::fs::File::open(&self.path).await?;
+        let mut f = tokio::fs::File::open(&self.path).await?.take(self.bytes);
         let mut buf = vec![0u8; 64 * 1024];
         let mut total = 0u64;
         loop {
@@ -476,7 +486,7 @@ impl Slot {
 
     /// The stored bytes in chunks (h2 delivery).
     pub fn chunks(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<Vec<u8>>>> {
-        let mut f = std::fs::File::open(&self.path)?;
+        let mut f = std::fs::File::open(&self.path)?.take(self.bytes);
         Ok(std::iter::from_fn(move || {
             let mut buf = vec![0u8; 16 * 1024];
             match f.read(&mut buf) {

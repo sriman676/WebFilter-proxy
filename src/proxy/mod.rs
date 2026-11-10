@@ -235,7 +235,11 @@ impl ProxyDeps {
         self.settings.load().mode.unwrap_or(self.cfg.mode)
     }
 
-    fn finish(&self, ev: RequestEvent) {
+    fn finish(&self, mut ev: RequestEvent) {
+        // Sanitize once, before any consumer: the telemetry ring feeds the admin API, dashboard
+        // and TUI, which must never see query values or uncapped fields (D-18, RV2-M1).
+        // `sanitize` is idempotent, so the logger's own pass is harmless.
+        ev.sanitize();
         self.telemetry.record(&ev);
         if ev.action == Action::Block.as_str()
             && let (Some(id), Some(profile)) = (&ev.client_id, &ev.profile)
@@ -364,26 +368,38 @@ impl ProxyDeps {
     }
 
     /// Re-read users, clients and profiles from the config file; the old set stays on error.
+    ///
+    /// Policies are stored before plugins load, so a broken plugin never holds back new users,
+    /// clients or profiles; only the plugin set is kept (O10, RV2-L3). A plugin failure still
+    /// returns `Err` (after the policies are active) so callers notice it, and is logged as
+    /// `ok: true` with a `plugins_error` field.
     pub fn reload_policies(&self) -> Result<(), String> {
         let path = self.cfg.source.as_ref().ok_or("no config file")?;
         let settings = self.settings.load_full();
         let result = Config::load(path).map_err(|e| e.to_string()).and_then(|c| {
             let policies = PolicySet::build(&settings.apply(&c))?;
-            // A plugin set that fails to load keeps the previous one (O10).
-            let plugins = crate::plugins::Plugins::load(&c.plugins)?;
             self.policies.store(Arc::new(policies));
-            if !plugins.is_empty() {
-                self.logger.system().event(
-                    SysEvent::PluginsLoaded,
-                    serde_json::json!({ "plugins": plugins.names() }),
-                );
-            }
-            self.plugins.store(Arc::new(plugins));
-            Ok(())
+            Ok(crate::plugins::Plugins::load(&c.plugins))
         });
         let detail = match &result {
-            Ok(()) => serde_json::json!({ "ok": true }),
+            Ok(Ok(_)) => serde_json::json!({ "ok": true }),
+            Ok(Err(e)) => serde_json::json!({ "ok": true, "plugins_error": e }),
             Err(e) => serde_json::json!({ "ok": false, "error": e }),
+        };
+        let result = match result {
+            Ok(Ok(plugins)) => {
+                if !plugins.is_empty() {
+                    self.logger.system().event(
+                        SysEvent::PluginsLoaded,
+                        serde_json::json!({ "plugins": plugins.names() }),
+                    );
+                }
+                self.plugins.store(Arc::new(plugins));
+                Ok(())
+            }
+            // The previous plugin set stays active.
+            Ok(Err(e)) => Err(format!("plugins: {e}")),
+            Err(e) => Err(e),
         };
         self.logger.system().event(SysEvent::PolicyReloaded, detail);
         result
