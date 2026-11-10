@@ -506,3 +506,89 @@ async fn rv2_m3_passthrough_sni_mismatch_blocked() {
     assert!(p.log_lines().iter().any(|l| l["reason"] == "sni_mismatch"));
     assert_eq!(origin.requests().len(), 1, "only the matching tunnel reached the origin");
 }
+
+/// A junk ECH extension (the proxy never decrypts ECH; any 0xfe0d counts as present).
+fn fake_ech() -> (u16, Vec<u8>) {
+    (0xfe0d, vec![0, 1, 2])
+}
+
+/// Review 3 M2: an ECH extension never exempts the outer SNI from the passthrough check, even
+/// with `tls.ech_action = "allow"`; with a matching outer SNI the ECH hello is tunnelled.
+#[tokio::test]
+async fn rv3_m2_fake_ech_cannot_skip_passthrough_sni_check() {
+    let origin = Origin::start(|_| Reply::ok("ech-tunnel")).await;
+    let port = origin.addr.port();
+    let resolver = TestResolver::with(&[("allowed.test", "127.0.0.1")]);
+    let mut p =
+        ProxyHarness::start(&base_config("[tls]\nech_action = \"allow\"\n"), &[], resolver).await;
+    let authority = format!("allowed.test:{port}");
+    let hello = synthetic_hello(&[sni_ext("blocked.test"), fake_ech()]);
+    let out = passthrough_hello(p.addr, &authority, &hello).await;
+    assert!(out.is_empty(), "closed without relaying: {}", String::from_utf8_lossy(&out));
+    // Matching outer SNI + ECH + allow: the bytes (hello, then a request) reach the origin.
+    let mut bytes = synthetic_hello(&[sni_ext("allowed.test"), fake_ech()]);
+    bytes.extend_from_slice(b"GET /ech HTTP/1.1\r\nHost: allowed.test\r\n\r\n");
+    let out = passthrough_hello(p.addr, &authority, &bytes).await;
+    assert!(String::from_utf8_lossy(&out).ends_with("ech-tunnel"), "tunnelled: {out:?}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    p.stop().await;
+    let logs = p.log_lines();
+    assert!(
+        logs.iter().any(|l| l["reason"] == "sni_mismatch"
+            && l["action"] == "blocked"
+            && l["tls_sni"] == "blocked.test"
+            && l["ech_present"] == true),
+        "{logs:?}"
+    );
+    assert!(!logs.iter().any(|l| l["reason"] == "ech_blocked"), "{logs:?}");
+    assert_eq!(origin.requests().len(), 1, "only the matching ECH tunnel reached the origin");
+}
+
+/// Review 3 M2: by default (`tls.ech_action = "block"`) an ECH ClientHello on a passthrough
+/// tunnel is refused with `ech_blocked`, even when its outer SNI matches the CONNECT host.
+#[tokio::test]
+async fn rv3_m2_ech_blocked_by_default_on_passthrough() {
+    let origin = Origin::start(|_| Reply::ok("never")).await;
+    let port = origin.addr.port();
+    let resolver = TestResolver::with(&[("allowed.test", "127.0.0.1")]);
+    let mut p = ProxyHarness::start(&base_config(""), &[], resolver).await;
+    let mut bytes = synthetic_hello(&[sni_ext("allowed.test"), fake_ech()]);
+    bytes.extend_from_slice(b"GET / HTTP/1.1\r\nHost: allowed.test\r\n\r\n");
+    let out = passthrough_hello(p.addr, &format!("allowed.test:{port}"), &bytes).await;
+    assert!(out.is_empty(), "closed without relaying: {}", String::from_utf8_lossy(&out));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    p.stop().await;
+    let logs = p.log_lines();
+    assert!(
+        logs.iter().any(|l| l["reason"] == "ech_blocked"
+            && l["action"] == "blocked"
+            && l["ech_present"] == true),
+        "{logs:?}"
+    );
+    assert!(origin.requests().is_empty());
+}
+
+/// Review 3 L5: `ca generate` refuses a symlinked or group/world-accessible `ca_dir` instead of
+/// following the link or chmod-ing the target.
+#[cfg(unix)]
+#[test]
+fn rv3_l5_ca_generate_refuses_symlinked_or_loose_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("elsewhere");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let link = dir.path().join("ca");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let err = CaStore::generate(&link).unwrap_err().to_string();
+    assert!(err.contains("symlink"), "{err}");
+    assert!(!real.join("ca.key").exists(), "nothing written through the link");
+    let loose = dir.path().join("loose");
+    std::fs::create_dir(&loose).unwrap();
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = CaStore::generate(&loose).unwrap_err().to_string();
+    assert!(err.contains("group/world"), "{err}");
+    assert!(!loose.join("ca.key").exists());
+    let mode = std::fs::metadata(&loose).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "permissions left for the operator to fix");
+}

@@ -41,6 +41,19 @@ fn mode(_: &std::path::Path) -> Option<u32> {
     None
 }
 
+/// Write-probe `dir` with a fresh, randomly named file created with `create_new` (never follows
+/// or reuses an existing path, review 3 L5), then remove it.
+fn write_probe(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let probe = dir.join(format!(".doctor-probe-{}", hex::encode(nonce)));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe)?;
+    let written = f.write_all(b"ok");
+    drop(f);
+    let removed = std::fs::remove_file(&probe);
+    written.and(removed)
+}
+
 /// Run every check against a loaded (hence valid) configuration.
 pub fn run(cfg: &Config) -> Vec<(Level, String)> {
     let mut out = vec![(Level::Pass, "configuration is valid".to_owned())];
@@ -95,12 +108,8 @@ pub fn run(cfg: &Config) -> Vec<(Level, String)> {
     }
 
     // Log directory writable.
-    let probe = cfg.logging.dir.join(".doctor-probe");
-    match std::fs::create_dir_all(&cfg.logging.dir).and_then(|()| std::fs::write(&probe, b"ok")) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            add(Level::Pass, format!("log dir {} is writable", cfg.logging.dir.display()));
-        }
+    match std::fs::create_dir_all(&cfg.logging.dir).and_then(|()| write_probe(&cfg.logging.dir)) {
+        Ok(()) => add(Level::Pass, format!("log dir {} is writable", cfg.logging.dir.display())),
         Err(e) => add(Level::Fail, format!("log dir {}: {e}", cfg.logging.dir.display())),
     }
 
