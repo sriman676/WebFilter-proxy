@@ -14,11 +14,9 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, status};
+use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, reason, status};
 use webfilter::config::{PluginConfig, PluginOnError};
 use webfilter::plugins::{Outcome, Plugins};
-
-const W: Duration = Duration::from_secs(10);
 
 /// The shipped example (`plugins/examples/block_keyword.wat`): blocks views containing `/ads`.
 const KEYWORD: &str = include_str!("../plugins/examples/block_keyword.wat");
@@ -64,13 +62,6 @@ async fn proxy(extra: &str, lists: &[(&str, &str)]) -> ProxyHarness {
     ProxyHarness::start(&base_config(extra), lists, r).await
 }
 
-async fn get(h: &ProxyHarness, host: &str, port: u16, path: &str) -> String {
-    let req = format!(
-        "GET http://{host}:{port}{path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-    );
-    h.raw(req.as_bytes(), W).await
-}
-
 #[tokio::test]
 async fn e84_plugin_blocks_by_view_and_logs_rule_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -78,12 +69,12 @@ async fn e84_plugin_blocks_by_view_and_logs_rule_id() {
     let origin = Origin::start(|_| Reply::ok("fine")).await;
     let port = origin.addr.port();
     let mut h = proxy(&plugin_toml("kw", &kw, "block"), &[]).await;
-    let blocked = get(&h, "ok.test", port, "/ads/banner").await;
+    let blocked = h.get("ok.test", port, "/ads/banner").await;
     assert_eq!(status(&blocked), 403, "{blocked}");
-    assert!(blocked.to_ascii_lowercase().contains("x-webfilter-reason: plugin_rule"));
-    assert_eq!(status(&get(&h, "ok.test", port, "/news").await), 200);
+    assert_eq!(reason(&blocked), "plugin_rule");
+    assert_eq!(status(&h.get("ok.test", port, "/news").await), 200);
     // Query values never reach the plugin: `/ads` only in a query value does not match.
-    assert_eq!(status(&get(&h, "ok.test", port, "/q?x=/ads").await), 200);
+    assert_eq!(status(&h.get("ok.test", port, "/q?x=/ads").await), 200);
     h.stop().await;
     let lines = h.log_lines();
     assert_eq!(
@@ -97,7 +88,7 @@ async fn e84_plugin_blocks_by_view_and_logs_rule_id() {
     // Monitor mode: logged as would_block, delivered.
     let mut h =
         proxy(&format!("mode = \"monitor\"\n{}", plugin_toml("kw", &kw, "block")), &[]).await;
-    assert_eq!(status(&get(&h, "ok.test", port, "/ads/x").await), 200);
+    assert_eq!(status(&h.get("ok.test", port, "/ads/x").await), 200);
     h.stop().await;
     assert_eq!(h.log_lines()[0]["would_block"], true);
 }
@@ -180,15 +171,15 @@ async fn e85_proxy_fail_closed_and_open_with_rate_limited_error_log() {
     let port = origin.addr.port();
     let mut h = proxy(&plugin_toml("trap", &trap, "block"), &[]).await;
     for _ in 0..3 {
-        let r = get(&h, "ok.test", port, "/").await;
+        let r = h.get("ok.test", port, "/").await;
         assert_eq!(status(&r), 403);
-        assert!(r.to_ascii_lowercase().contains("x-webfilter-reason: plugin_error"));
+        assert_eq!(reason(&r), "plugin_error");
     }
     h.stop().await;
     let errors = h.system_lines().into_iter().filter(|l| l["kind"] == "plugin_error").count();
     assert_eq!(errors, 1, "logged at most once a minute");
     let mut h = proxy(&plugin_toml("trap", &trap, "allow"), &[]).await;
-    assert_eq!(status(&get(&h, "ok.test", port, "/").await), 200, "fail open when configured");
+    assert_eq!(status(&h.get("ok.test", port, "/").await), 200, "fail open when configured");
     h.stop().await;
 }
 
@@ -205,20 +196,16 @@ async fn e86_plugins_only_add_blocks() {
     let extra = format!("[rules]\nallow_domains = [\"vip.test\"]\n{toml}");
     let mut h = proxy(&extra, &lists).await;
     // A plugin that never blocks cannot lift a list block.
-    let r = get(&h, "bad.test", port, "/").await;
-    assert_eq!(
-        (status(&r), r.to_ascii_lowercase().contains("x-webfilter-reason: domain_blocklist")),
-        (403, true),
-        "{r}"
-    );
+    let r = h.get("bad.test", port, "/").await;
+    assert_eq!((status(&r), reason(&r).as_str()), (403, "domain_blocklist"), "{r}");
     // Allowlisted hosts skip plugins.
-    assert_eq!(status(&get(&h, "vip.test", port, "/ads/x").await), 200);
+    assert_eq!(status(&h.get("vip.test", port, "/ads/x").await), 200);
     // Config order: the second plugin still runs after a no-opinion first one.
-    assert_eq!(status(&get(&h, "ok.test", port, "/ads/x").await), 403);
+    assert_eq!(status(&h.get("ok.test", port, "/ads/x").await), 403);
     // Reload with a broken plugin keeps the previous set.
     std::fs::write(&kw, "(module garbage").unwrap();
     assert!(h.handle.as_ref().unwrap().deps.reload_policies().is_err());
-    assert_eq!(status(&get(&h, "ok.test", port, "/ads/y").await), 403, "old set still active");
+    assert_eq!(status(&h.get("ok.test", port, "/ads/y").await), 403, "old set still active");
     let stats = h.handle.as_ref().unwrap().deps.plugins.load().stats();
     assert_eq!(
         stats.iter().map(|s| (s.0.as_str(), s.2)).collect::<Vec<_>>(),

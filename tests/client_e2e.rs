@@ -13,32 +13,9 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config};
-
-struct Run {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-/// `ClientRunner`: run the client binary against `proxy` with `out` as out-dir.
-async fn client(proxy: std::net::SocketAddr, out: &Path, args: &[&str]) -> Run {
-    let o = tokio::process::Command::new(env!("CARGO_BIN_EXE_webfilter-client"))
-        .arg("--proxy")
-        .arg(format!("http://{proxy}"))
-        .arg("--out-dir")
-        .arg(out)
-        .args(args)
-        .env_remove("WEBFILTER_PROXY")
-        .output()
-        .await
-        .unwrap();
-    Run {
-        code: o.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&o.stdout).into(),
-        stderr: String::from_utf8_lossy(&o.stderr).into(),
-    }
-}
+use common::{
+    Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config, run_client as client,
+};
 
 fn files(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir)

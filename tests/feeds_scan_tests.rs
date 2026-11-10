@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{
-    Lab, Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config, eicar, fake_clamd, status,
+    Lab, Origin, ProxyHarness, Reply, TestPki, TestResolver, base_config, body_of, eicar,
+    fake_clamd, status,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -421,14 +422,7 @@ async fn scan_proxy(mode: &str, extra: &str, clamd: u16) -> ProxyHarness {
 }
 
 async fn get(h: &ProxyHarness, port: u16, file: &str) -> String {
-    let req = format!(
-        "GET http://dl.test:{port}/{file} HTTP/1.1\r\nHost: dl.test:{port}\r\nConnection: close\r\n\r\n"
-    );
-    h.raw(req.as_bytes(), W).await
-}
-
-fn body_of(resp: &str) -> &[u8] {
-    resp.split_once("\r\n\r\n").map_or(&[], |(_, b)| b.as_bytes())
+    h.get("dl.test", port, &format!("/{file}")).await
 }
 
 #[tokio::test]

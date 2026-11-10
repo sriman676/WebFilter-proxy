@@ -122,6 +122,12 @@ load:
 # L-06 / PT-13.4: overhead with profiles, limits and metrics on vs plain.
 load-features:
     scripts/load_features.sh
+# Speed pass (A-31): perf flamegraphs under max-rate load.
+profile:
+    scripts/profile.sh
+# Stress test (A-40).
+stress:
+    scripts/stress.sh
 # Offline detection/template checks (TEST_PLAN section 8 fallback) and the live OpenSearch run (A-14).
 siem-test:
     python3 scripts/siem/siem_test.py

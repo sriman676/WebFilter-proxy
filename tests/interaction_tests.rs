@@ -13,21 +13,17 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::OnceLock;
 use std::time::Duration;
 
-use common::{Origin, ProxyHarness, Reply, TestResolver, eicar, fake_clamd, raw_exchange, status};
+use common::{
+    ADMIN_TOKEN, Origin, ProxyHarness, Reply, TestResolver, admin_token_hash, eicar, fake_clamd,
+    raw_exchange, reason, status,
+};
 use serde_json::Value;
 use webfilter::config::FeedFormat;
 use webfilter::feeds::{Store, parse_feed};
 
 const W: Duration = Duration::from_secs(10);
-const TOKEN: &str = "test-admin-token-0123456789";
-
-fn token_hash() -> &'static str {
-    static H: OnceLock<String> = OnceLock::new();
-    H.get_or_init(|| webfilter::auth::hash_password(TOKEN.as_bytes()).unwrap())
-}
 
 /// Admin + access requests + feed `bad` (feed.test) + scan (block) + local list (blocked.test),
 /// all on for the default profile. `deny_private` turns on the destination policy.
@@ -81,7 +77,7 @@ scan_downloads = true
 access_requests = true
 {profile_extra}
 "#,
-        hash = token_hash(),
+        hash = admin_token_hash(),
         feeds = feeds.display(),
     );
     let resolver = TestResolver::with(&[
@@ -99,27 +95,12 @@ async fn allow(admin: SocketAddr, host: &str) {
     let body =
         format!(r#"{{"host":"{host}","scope":"profile","target":"default","ttl_secs":600}}"#);
     let req = format!(
-        "POST /api/v1/temp-allows HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /api/v1/temp-allows HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {ADMIN_TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         admin.port(),
         body.len()
     );
     let r = raw_exchange(admin, req.as_bytes(), W).await;
     assert_eq!(status(&r), 201, "{r}");
-}
-
-async fn get(h: &ProxyHarness, host: &str, port: u16, path: &str) -> String {
-    let req = format!(
-        "GET http://{host}:{port}{path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-    );
-    h.raw(req.as_bytes(), W).await
-}
-
-fn reason(resp: &str) -> String {
-    resp.lines()
-        .find_map(|l| {
-            l.to_ascii_lowercase().strip_prefix("x-webfilter-reason: ").map(str::to_owned)
-        })
-        .unwrap_or_default()
 }
 
 fn origin_files() -> impl Fn(&[u8]) -> Reply + Send + Sync + 'static {
@@ -139,21 +120,21 @@ async fn ix_temp_allow_overrides_local_lists_but_never_feeds_or_scans() {
     let port = origin.addr.port();
     let (mut h, admin) = everything(false, "").await;
     // Before: local list and feed both block.
-    assert_eq!(reason(&get(&h, "blocked.test", port, "/").await), "domain_blocklist");
-    assert_eq!(reason(&get(&h, "feed.test", port, "/").await), "feed_domain");
+    assert_eq!(reason(&h.get("blocked.test", port, "/").await), "domain_blocklist");
+    assert_eq!(reason(&h.get("feed.test", port, "/").await), "feed_domain");
     allow(admin, "blocked.test").await;
     allow(admin, "feed.test").await;
     // IX-01: the temp allow lifts the local list block...
-    assert_eq!(status(&get(&h, "blocked.test", port, "/page").await), 200);
+    assert_eq!(status(&h.get("blocked.test", port, "/page").await), 200);
     // IX-02: ...but a feed hit on the same host (also on the local list) still blocks.
-    let r = get(&h, "feed.test", port, "/").await;
+    let r = h.get("feed.test", port, "/").await;
     assert_eq!((status(&r), reason(&r)), (403, "feed_domain".to_owned()), "{r}");
     // IX-03: a download through a temp-allowed host is still scanned and blocked.
-    let r = get(&h, "blocked.test", port, "/eicar.exe").await;
+    let r = h.get("blocked.test", port, "/eicar.exe").await;
     assert_eq!(status(&r), 403, "{r}");
     assert_eq!(reason(&r), "malware_detected");
     // A clean file through the same allow is delivered.
-    assert_eq!(status(&get(&h, "blocked.test", port, "/clean.exe").await), 200);
+    assert_eq!(status(&h.get("blocked.test", port, "/clean.exe").await), 200);
     h.stop().await;
     let lines = h.log_lines();
     let feed_hit = lines.iter().rfind(|l| l["dest_host"] == "feed.test").unwrap();
@@ -168,7 +149,7 @@ async fn ix_temp_allow_never_overrides_the_destination_policy() {
     let origin = Origin::start(origin_files()).await;
     let (mut h, admin) = everything(true, "").await;
     allow(admin, "blocked.test").await;
-    let r = get(&h, "blocked.test", origin.addr.port(), "/").await;
+    let r = h.get("blocked.test", origin.addr.port(), "/").await;
     assert_eq!(status(&r), 403, "{r}");
     assert_ne!(reason(&r), "allowlist");
     assert!(origin.requests().is_empty(), "loopback origin never contacted");
@@ -182,10 +163,10 @@ async fn ix_rate_limits_apply_to_block_pages_vhost_and_allowed_traffic_alike() {
     let (mut h, _) = everything(false, "[profiles.rate]\nrequests_per_sec = 1\nburst = 3\n").await;
     let vhost = b"GET http://webfilter.local/ HTTP/1.1\r\nHost: webfilter.local\r\nConnection: close\r\n\r\n";
     let statuses = [
-        status(&get(&h, "ok.test", port, "/").await),
-        status(&get(&h, "blocked.test", port, "/").await),
+        status(&h.get("ok.test", port, "/").await),
+        status(&h.get("blocked.test", port, "/").await),
         status(&h.raw(vhost, W).await),
-        status(&get(&h, "ok.test", port, "/").await),
+        status(&h.get("ok.test", port, "/").await),
     ];
     assert_eq!(
         &statuses[..3],
@@ -221,7 +202,7 @@ async fn upgrade_v1_0_config_loads_with_v1_1_features_off() {
     let lists = [("domains.txt", ""), ("url_patterns.txt", ""), ("ip_blocklist.txt", "")];
     let mut h =
         ProxyHarness::start(&demo, &lists, TestResolver::with(&[("ok.test", "127.0.0.1")])).await;
-    let r = get(&h, "ok.test", origin.addr.port(), "/").await;
+    let r = h.get("ok.test", origin.addr.port(), "/").await;
     assert_eq!(status(&r), 200, "{r}");
     assert!(h.handle.as_ref().unwrap().admin_addr.is_none(), "no admin listener");
     h.stop().await;
