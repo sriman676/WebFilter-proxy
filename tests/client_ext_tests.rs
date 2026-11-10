@@ -193,6 +193,11 @@ fn sh_snapshot_corpus() {
     let (_, o) = snap("style\u{fffd}\u{fffd})<V\0\n\u{feff}on\0>text");
     assert!(!o.contains("on\0") && !o.contains("\u{feff}on"), "PF-F-01: {o:?}");
     assert!(o.contains("text"), "content kept: {o:?}");
+    // ... and removing an element must not join a stray `<` with the text after it into a new tag.
+    for doc in ["<<vid\n\u{fffd}>ri onclick=x>", "a<<script>x</script>img src=x onerror=y>"] {
+        let (_, o) = snap(doc);
+        assert!(!o.contains("<ri") && !o.contains("<img"), "PF-F-01 join: {o:?}");
+    }
     for css in [
         "u<rl(http://evil.example/x.png)",
         "expressio<n(1)",
