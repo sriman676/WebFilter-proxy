@@ -3,7 +3,7 @@
 //! hosts (50,000 keys), active clients, and cumulative counters with bounded label sets only.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
@@ -19,40 +19,53 @@ pub const CLIENT_KEYS: usize = 10_000;
 pub const BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 10.0];
 
 /// Space-saving heavy hitters (Metwally et al.): at most `cap` keys; a new key replaces the
-/// smallest counter and inherits its count as error bound.
+/// smallest counter and inherits its count as error bound. `by_count` orders the same entries by
+/// (count, key), so every update and eviction is O(log n) even when the table is full.
 #[derive(Debug, Default)]
 pub struct SpaceSaving {
     cap: usize,
     counts: HashMap<String, u64>,
+    by_count: BTreeSet<(u64, String)>,
 }
 
 impl SpaceSaving {
     /// Empty, with capacity `cap`.
     pub fn new(cap: usize) -> Self {
-        Self { cap: cap.max(1), counts: HashMap::new() }
+        Self { cap: cap.max(1), counts: HashMap::new(), by_count: BTreeSet::new() }
     }
 
     /// Count one occurrence.
     pub fn add(&mut self, key: &str) {
         if let Some(c) = self.counts.get_mut(key) {
-            *c += 1;
+            let old = *c;
+            *c = old.saturating_add(1);
+            let entry = (old, key.to_owned());
+            self.by_count.remove(&entry);
+            self.by_count.insert((entry.0.saturating_add(1), entry.1));
             return;
         }
-        if self.counts.len() < self.cap {
-            self.counts.insert(key.to_owned(), 1);
-            return;
-        }
-        if let Some((min_key, min)) =
-            self.counts.iter().min_by_key(|(_, c)| **c).map(|(k, c)| (k.clone(), *c))
-        {
+        let start = if self.counts.len() < self.cap {
+            1
+        } else if let Some((min, min_key)) = self.by_count.pop_first() {
             self.counts.remove(&min_key);
-            self.counts.insert(key.to_owned(), min + 1);
-        }
+            min.saturating_add(1)
+        } else {
+            return;
+        };
+        self.counts.insert(key.to_owned(), start);
+        self.by_count.insert((start, key.to_owned()));
     }
 
-    /// The `n` largest counters.
+    /// The `n` largest counters (ties by key).
     pub fn top(&self, n: usize) -> Vec<(String, u64)> {
-        let mut v: Vec<(String, u64)> = self.counts.iter().map(|(k, c)| (k.clone(), *c)).collect();
+        let mut v: Vec<(String, u64)> = Vec::new();
+        for (c, k) in self.by_count.iter().rev() {
+            // Keep every key tied with the n-th count so the key order of ties stays stable.
+            if v.len() >= n && v.last().is_none_or(|(_, last)| last != c) {
+                break;
+            }
+            v.push((k.clone(), *c));
+        }
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v.truncate(n);
         v
@@ -287,5 +300,49 @@ pub fn render_counters(c: &Counters, out: &mut String) {
     );
     for (t, n) in &c.h2_flood {
         let _ = writeln!(out, "webfilter_h2_flood_total{{type=\"{}\"}} {n}", label(t));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_saving_full_table_is_fast_and_keeps_heavy_hitters() {
+        let mut s = SpaceSaving::new(TOP_KEYS);
+        let started = std::time::Instant::now();
+        for i in 0..200_000u32 {
+            s.add(&format!("noise-{i}.test"));
+            if i % 10 == 0 {
+                s.add("heavy.test");
+            }
+            if i % 20 == 0 {
+                s.add("second.test");
+            }
+        }
+        let secs = started.elapsed().as_secs_f64();
+        assert!(secs < 2.0, "200k distinct keys took {secs:.2}s (review L1)");
+        assert_eq!(s.counts.len(), TOP_KEYS);
+        assert_eq!(s.by_count.len(), TOP_KEYS, "index matches the map");
+        let top = s.top(2);
+        assert_eq!(top[0], ("heavy.test".to_owned(), 20_000));
+        assert_eq!(top[1], ("second.test".to_owned(), 10_000));
+    }
+
+    #[test]
+    fn space_saving_evicts_the_smallest_and_inherits_its_count() {
+        let mut s = SpaceSaving::new(2);
+        for k in ["a", "a", "a", "b", "c"] {
+            s.add(k);
+        }
+        // "b" (1) was the minimum: "c" replaced it with count 2 (error bound 1).
+        assert_eq!(s.top(5), vec![("a".to_owned(), 3), ("c".to_owned(), 2)]);
+        assert_eq!(s.top(0), Vec::new());
+        let mut s = SpaceSaving::new(10);
+        for k in ["z", "y", "x"] {
+            s.add(k);
+        }
+        assert_eq!(s.top(2), vec![("x".to_owned(), 1), ("y".to_owned(), 1)], "ties by key");
     }
 }
