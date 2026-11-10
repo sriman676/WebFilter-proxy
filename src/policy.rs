@@ -63,8 +63,9 @@ pub fn is_always_denied(ip: IpAddr) -> bool {
     }
 }
 
-/// Loopback, RFC 1918, CGNAT, link-local, ULA, multicast, unspecified, IETF/reserved/benchmark
-/// IPv4 ranges, NAT64 local-use, and transition addresses embedding any of these (D-11).
+/// Loopback, RFC 1918, CGNAT, link-local, ULA, site-local, multicast, unspecified,
+/// IETF/reserved/benchmark/documentation ranges, NAT64 local-use, and transition addresses
+/// embedding any of these (D-11).
 pub fn is_private(ip: IpAddr) -> bool {
     match fold_ip(ip) {
         IpAddr::V4(v4) => {
@@ -86,6 +87,7 @@ pub fn is_private(ip: IpAddr) -> bool {
                 || v6.is_multicast()
                 || (s0 & 0xffc0) == 0xfe80 // link-local
                 || (s0 & 0xfe00) == 0xfc00 // ULA
+                || (s0 & 0xffc0) == 0xfec0 // deprecated site-local fec0::/10
                 || (s0, s1, s2) == (0x64, 0xff9b, 1) // NAT64 local-use 64:ff9b:1::/48
                 || embedded_ipv4(v6).is_some_and(|v4| is_private(IpAddr::V4(v4)))
         }
