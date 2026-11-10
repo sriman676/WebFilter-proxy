@@ -11,6 +11,7 @@ use webfilter::blocklist::{Blocklists, ReloadOutcome};
 use webfilter::config::{Config, EXIT_INVALID_CONFIG, Mode};
 use webfilter::filter::{Phase, evaluate};
 use webfilter::normalize::{TargetContext, canonicalize};
+use webfilter::proxy::CliOverrides;
 
 #[derive(Parser)]
 #[command(name = "webfilter-proxy", version, about = "Filtering HTTP/HTTPS forward proxy")]
@@ -221,6 +222,17 @@ enum BlocklistCommand {
     },
 }
 
+/// `--listen` and `--mode`; the proxy re-applies them on every policy reload (RV3-M1).
+fn overrides(cli: &Cli) -> CliOverrides {
+    CliOverrides {
+        listen: cli.listen,
+        mode: cli.mode.map(|m| match m {
+            CliMode::Enforce => Mode::Enforce,
+            CliMode::Monitor => Mode::Monitor,
+        }),
+    }
+}
+
 /// Load the file, apply CLI overrides, re-validate (CLI wins, SPEC 6).
 fn load(cli: &Cli) -> Result<Config, ExitCode> {
     let invalid = |e: String| {
@@ -228,15 +240,7 @@ fn load(cli: &Cli) -> Result<Config, ExitCode> {
         ExitCode::from(EXIT_INVALID_CONFIG)
     };
     let mut cfg = Config::load(&cli.config).map_err(|e| invalid(e.to_string()))?;
-    if let Some(listen) = cli.listen {
-        cfg.listen = listen;
-    }
-    if let Some(mode) = cli.mode {
-        cfg.mode = match mode {
-            CliMode::Enforce => Mode::Enforce,
-            CliMode::Monitor => Mode::Monitor,
-        };
-    }
+    overrides(cli).apply(&mut cfg);
     if let Some(dir) = &cli.log_dir {
         cfg.logging.dir = std::path::absolute(dir).map_err(|e| invalid(e.to_string()))?;
     }
@@ -294,8 +298,8 @@ fn hash_password() -> ExitCode {
 }
 
 /// Serve until SIGINT/SIGTERM; SIGHUP reloads blocklists, SIGUSR1 reopens logs (D-31, D-67).
-async fn serve(cfg: Config) -> std::io::Result<()> {
-    let handle = webfilter::proxy::start(cfg, None).await?;
+async fn serve(cfg: Config, overrides: CliOverrides) -> std::io::Result<()> {
+    let handle = webfilter::proxy::start_with_overrides(cfg, None, overrides).await?;
     eprintln!("webfilter-proxy listening on {}", handle.local_addr);
     #[cfg(unix)]
     {
@@ -328,12 +332,12 @@ async fn serve(cfg: Config) -> std::io::Result<()> {
     Ok(())
 }
 
-fn run(cfg: Config) -> ExitCode {
+fn run(cfg: Config, overrides: CliOverrides) -> ExitCode {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(cfg.effective_worker_threads())
         .enable_all()
         .build();
-    match runtime.and_then(|rt| rt.block_on(serve(cfg))) {
+    match runtime.and_then(|rt| rt.block_on(serve(cfg, overrides))) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -398,6 +402,8 @@ fn main() -> ExitCode {
         Some(Command::Blocklist { command: BlocklistCommand::Test { url } }) => {
             load(&cli).map_or_else(|code| code, |c| blocklist_test(&c, url))
         }
-        Some(Command::Run) | None => load(&cli).map_or_else(|code| code, run),
+        Some(Command::Run) | None => {
+            load(&cli).map_or_else(|code| code, |c| run(c, overrides(&cli)))
+        }
     }
 }
