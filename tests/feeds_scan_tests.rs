@@ -764,3 +764,52 @@ async fn e67_yara_rule_hit_blocks() {
         (Some("yara"), Some("wf_test_marker"))
     );
 }
+
+/// Review L7: the API key and validators stay on the configured origin; a redirect to the same
+/// hostname on another port is followed without them.
+#[tokio::test]
+async fn l7_feed_key_not_sent_to_same_host_other_port() {
+    let pki = TestPki::new();
+    let lab = Lab::new();
+    let seen_b: Seen = Arc::default();
+    let other =
+        feed_server(&pki, Arc::new(Mutex::new("x.example\n".into())), Arc::clone(&seen_b), 1).await;
+    let seen_a: Seen = Arc::default();
+    let (sa, other_port) = (Arc::clone(&seen_a), other.addr.port());
+    let origin = Origin::start_tls(pki.leaf(&["feed.test"], false), move |req| {
+        sa.lock().unwrap().push(String::from_utf8_lossy(req).into_owned());
+        Reply::raw(format!(
+            "HTTP/1.1 302 Found\r\nlocation: https://feed.test:{other_port}/list\r\ncontent-length: 0\r\n\r\n"
+        ))
+    })
+    .await;
+    let key = lab.path().join("key");
+    std::fs::write(&key, "SECRETKEY\n").unwrap();
+    let cfg = FeedConfig {
+        auth_header_file: key.clone(),
+        ..feed_cfg(
+            "f",
+            &format!("https://feed.test:{}/start", origin.addr.port()),
+            FeedFormat::DomainsText,
+        )
+    };
+    let resolver = TestResolver::with(&[("feed.test", "127.0.0.1")]);
+    let m = FeedManager::new(
+        vec![cfg],
+        lab.path().join("p"),
+        vec![],
+        Some(fetcher(&pki, lab.path(), true, resolver)),
+        None,
+    );
+    assert!(m.update("f", false).await.is_ok());
+    assert!(
+        seen_a.lock().unwrap().iter().any(|r| r.contains("SECRETKEY")),
+        "key sent to its origin"
+    );
+    let b = seen_b.lock().unwrap();
+    assert!(!b.is_empty(), "redirect followed");
+    assert!(
+        !b.iter().any(|r| r.to_ascii_lowercase().contains("auth-key") || r.contains("SECRETKEY")),
+        "key never sent to another port: {b:?}"
+    );
+}

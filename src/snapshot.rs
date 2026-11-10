@@ -151,19 +151,46 @@ pub fn rewrite_css(css: &str, map: &dyn Fn(&str) -> Option<String>) -> String {
         }
     }
     out.push_str(css.get(i..).unwrap_or(""));
-    // The replacement contains no character of any pattern's edges; the loop runs to a fixpoint.
+    // Linear passes to a fixpoint. `x_` shares no character with any pattern except an `x` that
+    // no pattern ends with, so a replacement cannot form a new match: the second pass only
+    // confirms that. Each pass is O(n) (review M4: the old find/replace loop was quadratic).
     let mut clean = out;
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bad in ["expression(", "behavior:", "behaviour:", "-moz-binding", "javascript:"] {
-            while let Some(p) = clean.to_ascii_lowercase().find(bad) {
-                clean.replace_range(p..p + bad.len(), "x_");
-                changed = true;
-            }
-        }
+    while let Some(next) = neutralize_pass(&clean) {
+        clean = next;
     }
     clean
+}
+
+/// Patterns that make CSS executable in some engine; each is replaced by `x_`.
+const CSS_BAD: [&str; 5] =
+    ["expression(", "behavior:", "behaviour:", "-moz-binding", "javascript:"];
+
+/// One left-to-right pass replacing every ASCII-case-insensitive [`CSS_BAD`] occurrence with
+/// `x_`; `None` when nothing matched. Patterns are ASCII, so cuts stay on char boundaries.
+fn neutralize_pass(css: &str) -> Option<String> {
+    let bytes = css.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut changed = false;
+    let mut i = 0;
+    while let Some(rest) = bytes.get(i..) {
+        let Some(&first) = rest.first() else { break };
+        let hit = CSS_BAD.iter().find(|bad| {
+            rest.get(..bad.len()).is_some_and(|w| w.eq_ignore_ascii_case(bad.as_bytes()))
+        });
+        if let Some(bad) = hit {
+            out.extend_from_slice(b"x_");
+            i += bad.len();
+            changed = true;
+        } else {
+            out.push(first);
+            i += 1;
+        }
+    }
+    // Only whole ASCII runs were replaced, so `out` is valid UTF-8; the lossy path never runs.
+    changed.then(|| {
+        String::from_utf8(out)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    })
 }
 
 /// Local name `<stem>_files/<hash8>_<basename>.<ext>`, extension from the media type (C3).

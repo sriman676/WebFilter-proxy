@@ -268,19 +268,34 @@ pub fn draw(f: &mut Frame, st: &State) {
 
 /// Minimal client for the loopback admin API (Bearer token from a file or env; never argv).
 pub struct AdminClient {
-    addr: String,
+    addr: std::net::SocketAddr,
     host: String,
     token: String,
 }
 
 impl AdminClient {
-    /// `admin` is `http://host:port`.
+    /// `admin` is `http://<loopback>:<port>` where the host is a loopback IP literal
+    /// (`127.0.0.0/8`, `[::1]`) or `localhost` and the port is explicit. Anything else is
+    /// refused: the Bearer token travels in cleartext and must never leave the machine (L8).
     pub fn new(admin: &str, token: String) -> Result<Self, String> {
-        let hp = admin
-            .strip_prefix("http://")
-            .ok_or("--admin must be http://127.0.0.1:port")?
-            .trim_end_matches('/');
-        Ok(Self { addr: hp.to_owned(), host: hp.to_owned(), token })
+        const USAGE: &str = "--admin must be http://127.0.0.1:<port> (a loopback address or localhost, explicit port)";
+        let rest = admin.strip_prefix("http://").ok_or(USAGE)?;
+        let hp = rest.strip_suffix('/').unwrap_or(rest);
+        let (host, port) = hp.rsplit_once(':').ok_or(USAGE)?;
+        let port =
+            port.parse::<u16>().ok().filter(|p| *p != 0 && !port.starts_with('+')).ok_or(USAGE)?;
+        let ip: std::net::IpAddr = if host.eq_ignore_ascii_case("localhost") {
+            // Never resolved: a hosts-file entry cannot send the token elsewhere.
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            v6.parse::<std::net::Ipv6Addr>().map_err(|_| USAGE)?.into()
+        } else {
+            host.parse::<std::net::Ipv4Addr>().map_err(|_| USAGE)?.into()
+        };
+        if !ip.is_loopback() {
+            return Err(USAGE.to_owned());
+        }
+        Ok(Self { addr: (ip, port).into(), host: hp.to_owned(), token })
     }
 
     async fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<Value, String> {
@@ -407,4 +422,50 @@ pub async fn run(client: AdminClient) -> std::io::Result<()> {
     };
     ratatui::try_restore()?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdminClient;
+
+    #[test]
+    fn admin_url_must_be_loopback_http_with_port() {
+        for ok in [
+            "http://127.0.0.1:8081",
+            "http://127.0.0.1:8081/",
+            "http://127.1.2.3:9",
+            "http://[::1]:8081",
+            "http://localhost:8081",
+            "http://LOCALHOST:8081",
+        ] {
+            let c = AdminClient::new(ok, "t".into());
+            assert!(c.is_ok_and(|c| c.addr.ip().is_loopback()), "{ok}");
+        }
+        for bad in [
+            "http://other:80",
+            "http://10.0.0.1:8081",
+            "http://0.0.0.0:8081",
+            "http://[::]:8081",
+            "http://[2001:db8::1]:8081",
+            "https://127.0.0.1:8081",
+            "127.0.0.1:8081",
+            "http://127.0.0.1",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:+80",
+            "http://127.0.0.1:70000",
+            "http://user@127.0.0.1:8081",
+            "http://127.0.0.1:8081/path",
+            "http://127.0.0.1.evil.example:8081",
+            "http://localhost.evil.example:8081",
+            "http://127.0.0.1:8081\r\nX: y",
+            "http://::1:8081",
+        ] {
+            let e = AdminClient::new(bad, "t".into()).err();
+            assert!(
+                e.as_deref().is_some_and(|e| e.contains("loopback")),
+                "{bad:?} must be refused"
+            );
+        }
+    }
 }
