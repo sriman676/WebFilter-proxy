@@ -208,6 +208,8 @@ pub struct ProxyDeps {
     pub access: Arc<crate::access::AccessState>,
     /// Dashboard settings (A-30).
     pub settings: arc_swap::ArcSwap<crate::profiles::Settings>,
+    /// WASM rule plugins (O10); reloaded with policies.
+    pub plugins: arc_swap::ArcSwap<crate::plugins::Plugins>,
     auth: ProxyAuth,
     per_ip: Mutex<HashMap<IpAddr, usize>>,
     shutdown: watch::Receiver<bool>,
@@ -281,6 +283,45 @@ impl ProxyDeps {
                 ..Decision::allow()
             };
         }
+        // Plugins only ever add blocks, and only to requests nothing else has decided (O10).
+        let connect = matches!(phase, Phase::ConnectPreDns);
+        if d.action == Action::Allow
+            && d.reason != Reason::Allowlist
+            && !d.would_block
+            && (connect || matches!(phase, Phase::PreDns))
+        {
+            let plugins = self.plugins.load();
+            if !plugins.is_empty() {
+                let view = crate::plugins::view(t, connect, &profile.name);
+                match plugins.check(&view) {
+                    Some(crate::plugins::Outcome::Block { plugin }) => {
+                        return Decision::block(
+                            profile.mode,
+                            Reason::PluginRule,
+                            format!("plugin:{plugin}"),
+                            "plugins",
+                        );
+                    }
+                    Some(crate::plugins::Outcome::Error { plugin, block, detail, log }) => {
+                        if log {
+                            self.logger.system().event(
+                                SysEvent::PluginError,
+                                serde_json::json!({ "plugin": plugin, "detail": detail, "blocked": block }),
+                            );
+                        }
+                        if block {
+                            return Decision::block(
+                                profile.mode,
+                                Reason::PluginError,
+                                format!("plugin:{plugin}"),
+                                "plugins",
+                            );
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
         d
     }
 
@@ -325,10 +366,20 @@ impl ProxyDeps {
     pub fn reload_policies(&self) -> Result<(), String> {
         let path = self.cfg.source.as_ref().ok_or("no config file")?;
         let settings = self.settings.load_full();
-        let result = Config::load(path)
-            .map_err(|e| e.to_string())
-            .and_then(|c| PolicySet::build(&settings.apply(&c)))
-            .map(|p| self.policies.store(Arc::new(p)));
+        let result = Config::load(path).map_err(|e| e.to_string()).and_then(|c| {
+            let policies = PolicySet::build(&settings.apply(&c))?;
+            // A plugin set that fails to load keeps the previous one (O10).
+            let plugins = crate::plugins::Plugins::load(&c.plugins)?;
+            self.policies.store(Arc::new(policies));
+            if !plugins.is_empty() {
+                self.logger.system().event(
+                    SysEvent::PluginsLoaded,
+                    serde_json::json!({ "plugins": plugins.names() }),
+                );
+            }
+            self.plugins.store(Arc::new(plugins));
+            Ok(())
+        });
         let detail = match &result {
             Ok(()) => serde_json::json!({ "ok": true }),
             Err(e) => serde_json::json!({ "ok": false, "error": e }),
@@ -441,6 +492,10 @@ pub async fn start_with(
     if !settings.categories.is_empty() {
         let _ = lists.set_category_overrides(settings.categories.clone());
     }
+    let plugins = crate::plugins::Plugins::load(&cfg.plugins).map_err(invalid)?;
+    if !plugins.is_empty() {
+        sys.event(SysEvent::PluginsLoaded, serde_json::json!({ "plugins": plugins.names() }));
+    }
     let scanner = if cfg.scan.enabled {
         Some(Arc::new(crate::scan::Scanner::new(cfg.scan.clone()).map_err(invalid)?))
     } else {
@@ -479,6 +534,7 @@ pub async fn start_with(
         telemetry: Arc::new(crate::telemetry::Telemetry::default()),
         access: Arc::new(access),
         settings: arc_swap::ArcSwap::from_pointee(settings),
+        plugins: arc_swap::ArcSwap::from_pointee(plugins),
         auth: ProxyAuth::new(),
         per_ip: Mutex::new(HashMap::new()),
         shutdown: rx,

@@ -88,3 +88,43 @@ with >= 1 GiB free; transparent-mode prerequisites; tool versions vs `docs/ENVIR
 
 ## O8. State directory (`state/`, 0700)
 `temp_allows.json`, `access_requests.jsonl`, `scan_tmp/`; `feeds/<name>/` holds versions. Backup/restore and drills: `docs/OPERATIONS.md`.
+
+## O9. Browser extension (`extension/`, Phase 14, A-30)
+One Manifest V3 codebase for Chrome/Chromium (>= 121) and Firefox (>= 128); loaded unpacked, never published.
+- Permissions: `storage`, `proxy`, `alarms`; host permissions only `http://127.0.0.1/*`, `http://localhost/*`,
+  `http://[::1]/*`. No content scripts, no `<all_urls>`, no remote code, default MV3 extension CSP.
+- Talks only to the admin API (O3) with GET requests and a read-only token; never to the proxy data path.
+- Options: admin URL (http, loopback host, explicit port; anything else refused), read-only token (stored in
+  `storage.local`, never logged or shown again), proxy `host:port` (loopback only, default `127.0.0.1:8080`).
+- Badge: polled every minute and when the popup opens (`/api/v1/stats`): blocked requests since the extension
+  started; green = proxy toggle on, grey = off, red `!` = admin API unreachable or token refused.
+- Popup: mode and counters; the last 10 blocks (`/api/v1/events/recent?action=blocked&limit=10`) rendered with
+  `textContent` only; "Request access" opens the blocked http(s) URL in a new tab, where the proxy shows the
+  block page with its request form (O6); other schemes are not opened.
+- Proxy toggle: Chrome `chrome.proxy.settings` (`fixed_servers`, single HTTP proxy, bypass `<local>`); Firefox
+  `browser.proxy.settings` (`manual`, same proxy for HTTP and HTTPS; needs private-window access). Off restores
+  `system`.
+- Admin API addition: `[admin] readonly_token_hash` (argon2id, optional). That token may only GET/HEAD (API,
+  `/metrics`); any state change answers 403 and is audited with actor `readonly`. Lockout and caching as O1.
+
+## O10. Rule plugins (`plugins` cargo feature, off by default; Phase 14, A-30)
+- Config: `[[plugins]] name, path (.wasm or .wat, <= 4 MiB), enabled = false, fuel = 1000000,
+  max_memory_bytes = 1048576, on_error = "block" | "allow" (default "block")`. Plugins configured in a binary
+  built without the feature is a config error (fail closed). Names are unique, `[a-z0-9_-]{1,32}`.
+- Sandbox: wasmtime with fuel metering and a memory limiter; the module must import nothing (no WASI, no host
+  functions) and export `memory`, `wf_alloc(i32) -> i32` and `wf_decide(i32, i32) -> i32`; anything else is
+  refused at load. Each call uses a fresh store and instance (no state between requests).
+- Request view (JSON, <= 8 KiB): `{"v":1,"phase":"request"|"connect","scheme","host","port","path",
+  "query_keys","profile"}`; path truncated to 2,048 bytes. Never query values, headers, bodies, client address
+  or user (D-18). The host copies it to the pointer returned by `wf_alloc` (bounds checked).
+- Result: 0 = no opinion, 1 = block. Traps, fuel exhaustion, memory limit, out-of-bounds pointers and other
+  return values are errors: `on_error` decides (block reason `plugin_error`), counted, and a `plugin_error`
+  system event is logged at most once a minute per plugin.
+- Order: plugins run only when the decision after allowlist, feeds, temp allows and local rules is still
+  "allow"; config order, first block wins (`reason=plugin_rule`, `rule_list=plugins`, `rule_id=plugin:<name>`).
+  A plugin can never allow, so it cannot override feeds, scanning, the destination policy or any other block;
+  allowlisted and temp-allowed requests skip plugins. Plugin blocks are not eligible for access requests.
+  Monitor mode logs `would_block` as for other rules.
+- Reload with policies (SIGHUP, config change); a plugin failing to load keeps the previous set.
+- Admin: `GET /api/v1/plugins` (name, calls, blocks, errors); metrics `webfilter_plugin_calls_total`,
+  `webfilter_plugin_blocks_total`, `webfilter_plugin_errors_total` labelled by configured plugin name.

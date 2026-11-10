@@ -36,7 +36,7 @@ index = docs.get("INDEX.md", "")
 for name in docs:
     if not name.endswith("_cases.md") and name not in ("CLAUDE.md", "INDEX.md") and name not in index:
         errs.append(f"{name} is not listed in docs/INDEX.md")
-for n in range(0, 14):
+for n in range(0, 15):
     f = f"PHASE-{n}.md"
     if f not in briefs: errs.append(f"missing phase brief {f}"); continue
     if n:

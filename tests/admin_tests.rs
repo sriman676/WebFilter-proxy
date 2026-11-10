@@ -158,6 +158,51 @@ async fn auth_lockout_origin_and_security_headers() {
     }
 }
 
+/// E-87: the read-only token (browser extension, O9) reads but never changes state.
+#[tokio::test]
+async fn e87_readonly_token_reads_only() {
+    const RO: &str = "read-only-token-for-the-extension-42";
+    let ro_hash = webfilter::auth::hash_password(RO.as_bytes()).unwrap();
+    let config = base_config(&format!(
+        "[admin]\nenabled = true\nlisten = \"127.0.0.1:0\"\ntoken_hash = \"{}\"\nreadonly_token_hash = \"{ro_hash}\"\n",
+        token_hash()
+    ));
+    let mut h = ProxyHarness::start(&config, &[], TestResolver::with(&[])).await;
+    let a = h.handle.as_ref().unwrap().admin_addr.unwrap();
+    let host = format!("127.0.0.1:{}", a.port());
+    let ro = format!("Authorization: Bearer {RO}\r\nContent-Type: application/json\r\n");
+    for path in ["/api/v1/stats", "/api/v1/events/recent?action=blocked&limit=10", "/metrics"] {
+        let r = admin(a, "GET", path, Some(&host), &ro, "").await;
+        assert_eq!(status(&r), 200, "{path}: {r}");
+    }
+    for (method, path, body) in [
+        ("POST", "/api/v1/settings", r#"{"mode":"monitor"}"#),
+        (
+            "POST",
+            "/api/v1/temp-allows",
+            r#"{"host":"x.test","target":"default","scope":"profile"}"#,
+        ),
+        ("DELETE", "/api/v1/temp-allows/abc", "{}"),
+    ] {
+        let r = admin(a, method, path, Some(&host), &ro, body).await;
+        assert_eq!(status(&r), 403, "{method} {path}: {r}");
+        assert!(r.contains("read-only token"));
+    }
+    // The admin token still works for changes; a wrong token is still 401.
+    let (st, _) = api(a, "GET", "settings", "").await;
+    assert_eq!(st, 200);
+    let bad =
+        admin(a, "GET", "/api/v1/stats", Some(&host), "Authorization: Bearer nope\r\n", "").await;
+    assert_eq!(status(&bad), 401);
+    h.stop().await;
+    let audit = std::fs::read_to_string(h.lab.path().join("logs/webfilter_admin.jsonl")).unwrap();
+    assert_eq!(
+        audit.lines().filter(|l| l.contains("\"readonly\"") && l.contains("denied")).count(),
+        3
+    );
+    assert!(!audit.contains(RO), "token never logged");
+}
+
 #[tokio::test]
 async fn metrics_and_read_api() {
     let origin = Origin::start(|_| Reply::ok("hi")).await;

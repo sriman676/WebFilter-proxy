@@ -1,12 +1,12 @@
 # Project State (update at every gate; first file read when resuming)
-Current phase: 14 (not started)
+Current phase: end sequence (review fixes, speed pass, audit, stress, pentest, submission)
 Milestone tags: m1-complete, m2-complete
-Last green commit: phase-13-complete
+Last green commit: phase-14-complete
 Open findings: none Critical/High. Deferred: PF-0-14 (insecure-test sentinel)
 Hosts: build on Windows (gnu + WinLibs), test/gate in WSL (`. ~/.wfenv`).
 User decisions taken up front: A-24..A-29. Flow: build+test every phase, tag, continue; ALL pentesting at the end,
 then full-codebase redundancy cleanup, then merge to main + v1.1.0 (no push).
-Next action: execute docs/phases/PHASE-14.md (WebExtension + WASM rule plugins). Then speed pass, audit, stress test (A-40), consolidated pentest (incl. PT-13.1/13.6/13.7, m3/m4/m5 tags), brag video (A-41), merge + v1.1.0. User: rerun netns e2e, install ffmpeg.
+Next action: merge review-fix branches (M1-M4, L1-L8), then speed pass, redundancy audit, stress test (scripts/stress.sh, A-40), consolidated pentest (pentest-p1..p14, m3/m4/m5 tags), then README + REPORT + brag video (A-41), merge to main + v1.1.0, user pushes to a private GitHub repo. User: rerun netns e2e, install ffmpeg, create the repo.
 
 | Phase | Status | Gate date | Tag | Notes |
 |---|---|---|---|---|
@@ -24,3 +24,4 @@ Next action: execute docs/phases/PHASE-14.md (WebExtension + WASM rule plugins).
 | 11 | done | 2026-11-09 | phase-11-complete | 262 tests, cov 84.7%; promtool PASS; dashboard checked in Chrome; PF-11-01 fixed; pentest deferred (A-29) |
 | 12 | done | 2026-11-10 | phase-12-complete | 278 tests, cov 85.3%; F-19..F-22 fuzzed (PF-12-02..04 fixed); PF-12-01 fixed; E-80 browser check and pentest deferred (A-29) |
 | 13 | done | 2026-11-10 | phase-13-complete | E-83 + upgrade + h2 limits tests; L-06 PASS (-2.1 %); E-80 PASS in Chromium; deny/audit clean (A-45); pentest deferred (A-29) |
+| 14 | done | 2026-11-10 | phase-14-complete | extension + read-only token + WASM plugins; 285 + 5 plugin tests; F-23 251k runs clean; ext-lint PASS; pentest deferred (A-29) |

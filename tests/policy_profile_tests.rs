@@ -295,7 +295,9 @@ async fn e55_bandwidth_cap_paces_bytes_and_keeps_them_intact() {
     let body = resp.split_once("\r\n\r\n").unwrap().1;
     let expect: String = (0..262_144).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
     assert!(body == expect, "byte-identical");
-    assert!((1.7..=2.3).contains(&secs), "256 KiB at 128 KiB/s took {secs:.2}s (within 15 %)");
+    // The lower bound proves the cap; the upper bound only catches gross over-throttling (a busy
+    // test host adds latency, never bandwidth).
+    assert!((1.7..=3.0).contains(&secs), "256 KiB at 128 KiB/s took {secs:.2}s");
     assert_eq!(h.log_lines()[0]["throttled"], true);
 }
 

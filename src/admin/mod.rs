@@ -42,6 +42,8 @@ struct Admin {
     origins: Vec<String>,
     lockout: Lockout<IpAddr>,
     verified: Mutex<Option<[u8; 32]>>,
+    /// Same cache for the read-only token (O9).
+    verified_ro: Mutex<Option<[u8; 32]>>,
     argon: Semaphore,
 }
 
@@ -64,6 +66,7 @@ pub async fn spawn(
         origins,
         lockout: Lockout::default(),
         verified: Mutex::new(None),
+        verified_ro: Mutex::new(None),
         argon: Semaphore::new(2),
     });
     let slots = Arc::new(Semaphore::new(admin.deps.cfg.admin.max_connections));
@@ -190,9 +193,14 @@ impl Admin {
             }
             _ => {}
         }
-        // 3. Everything else needs the Bearer token.
-        if let Err(r) = self.authenticate(&req, peer).await {
-            return *r;
+        // 3. Everything else needs the Bearer token; the read-only token may not change state.
+        let readonly = match self.authenticate(&req, peer).await {
+            Ok(ro) => ro,
+            Err(r) => return *r,
+        };
+        if readonly && changing {
+            self.deps.logger.admin("readonly", &peer.ip().to_string(), "write", &path, "denied");
+            return err(StatusCode::FORBIDDEN, "the read-only token cannot change state");
         }
         if path == "/metrics" && req.method() == Method::GET {
             return self.metrics();
@@ -242,11 +250,12 @@ impl Admin {
         resp
     }
 
+    /// Ok(true) for the read-only token, Ok(false) for the admin token.
     async fn authenticate(
         &self,
         req: &Request<Incoming>,
         peer: SocketAddr,
-    ) -> Result<(), Box<Resp>> {
+    ) -> Result<bool, Box<Resp>> {
         let ip = peer.ip();
         let now = std::time::Instant::now();
         if self.lockout.is_locked(ip, now) {
@@ -271,25 +280,38 @@ impl Admin {
             return fail(self);
         }
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        let cached = self
-            .verified
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some_and(|d| bool::from(d.ct_eq(&digest)));
-        if cached {
-            return Ok(());
+        let hit = |cache: &Mutex<Option<[u8; 32]>>| {
+            cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some_and(|d| bool::from(d.ct_eq(&digest)))
+        };
+        if hit(&self.verified) {
+            return Ok(false);
+        }
+        if hit(&self.verified_ro) {
+            return Ok(true);
         }
         let Ok(_permit) = self.argon.acquire().await else { return fail(self) };
-        let (phc, t) = (self.deps.cfg.admin.token_hash.0.clone(), token.to_owned());
-        let ok = tokio::task::spawn_blocking(move || verify_password(&phc, t.as_bytes()))
-            .await
-            .unwrap_or(false);
-        if !ok {
-            return fail(self);
+        let admin = &self.deps.cfg.admin;
+        for (phc, cache, readonly) in [
+            (&admin.token_hash.0, &self.verified, false),
+            (&admin.readonly_token_hash.0, &self.verified_ro, true),
+        ] {
+            if phc.is_empty() {
+                continue;
+            }
+            let (phc, t) = (phc.clone(), token.to_owned());
+            let ok = tokio::task::spawn_blocking(move || verify_password(&phc, t.as_bytes()))
+                .await
+                .unwrap_or(false);
+            if ok {
+                *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(digest);
+                self.lockout.record_success(ip);
+                return Ok(readonly);
+            }
         }
-        *self.verified.lock().unwrap_or_else(|e| e.into_inner()) = Some(digest);
-        self.lockout.record_success(ip);
-        Ok(())
+        fail(self)
     }
 
     fn readyz(&self) -> Resp {
@@ -376,6 +398,22 @@ impl Admin {
                 label(result)
             );
         }
+        let plugins = d.plugins.load().stats();
+        for (metric, help, pick) in [
+            ("webfilter_plugin_calls_total", "Rule plugin calls.", 0usize),
+            ("webfilter_plugin_blocks_total", "Requests blocked by rule plugins.", 1),
+            (
+                "webfilter_plugin_errors_total",
+                "Rule plugin errors (traps, fuel, memory, bad results).",
+                2,
+            ),
+        ] {
+            metric_header(&mut out, metric, "counter", help);
+            for (name, calls, blocks, errors) in &plugins {
+                let n = [calls, blocks, errors].get(pick).map_or(0, |v| **v);
+                let _ = writeln!(out, "{metric}{{plugin=\"{}\"}} {n}", label(name));
+            }
+        }
         metric_header(&mut out, "webfilter_access_requests", "gauge", "Access requests by state.");
         for (state, n) in d.access.counts() {
             let _ = writeln!(out, "webfilter_access_requests{{state=\"{state}\"}} {n}");
@@ -447,6 +485,7 @@ impl Admin {
                 "config_allow_domains": d.cfg.rules.allow_domains }),
             "feeds" => json!(d.feeds.status()),
             "temp-allows" => json!(d.access.allows()),
+            "plugins" => json!(d.plugins.load().stats().into_iter().map(|(name, calls, blocks, errors)| json!({"name": name, "calls": calls, "blocks": blocks, "errors": errors})).collect::<Vec<_>>()),
             "access-requests" => json!(d.access.requests(q(qs, "status"))),
             "audit" => {
                 let text = std::fs::read_to_string(d.cfg.logging.dir.join(crate::logger::ADMIN_FILE)).unwrap_or_default();

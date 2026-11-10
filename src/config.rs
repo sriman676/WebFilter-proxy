@@ -129,6 +129,8 @@ pub struct Config {
     pub access_requests: AccessRequestsConfig,
     /// State directory (O8).
     pub state: StateConfig,
+    /// WASM rule plugins (O10); need the `plugins` cargo feature.
+    pub plugins: Vec<PluginConfig>,
 }
 
 impl Default for Config {
@@ -164,6 +166,7 @@ impl Default for Config {
             scan: ScanConfig::default(),
             access_requests: AccessRequestsConfig::default(),
             state: StateConfig::default(),
+            plugins: Vec::new(),
         }
     }
 }
@@ -939,6 +942,48 @@ impl Default for TransparentConfig {
     }
 }
 
+/// What a plugin error means for the request (O10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginOnError {
+    /// Block with `plugin_error` (fail closed).
+    #[default]
+    Block,
+    /// Let the request continue.
+    Allow,
+}
+
+/// One `[[plugins]]` entry (O10).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PluginConfig {
+    /// Unique name (`plugin:<name>` rule ids, metric labels).
+    pub name: String,
+    /// `.wasm` or `.wat` module.
+    pub path: PathBuf,
+    /// Off unless enabled.
+    pub enabled: bool,
+    /// Fuel per call.
+    pub fuel: u64,
+    /// Linear memory cap.
+    pub max_memory_bytes: usize,
+    /// Errors block (default) or allow.
+    pub on_error: PluginOnError,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            path: PathBuf::new(),
+            enabled: false,
+            fuel: 1_000_000,
+            max_memory_bytes: 1024 * 1024,
+            on_error: PluginOnError::Block,
+        }
+    }
+}
+
 /// `[admin]` (Phase 11, D-55). Loopback only.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -949,6 +994,8 @@ pub struct AdminConfig {
     pub listen: SocketAddr,
     /// argon2id hash of the bearer token.
     pub token_hash: Redacted<String>,
+    /// argon2id hash of an optional read-only token (GET/HEAD only; O9).
+    pub readonly_token_hash: Redacted<String>,
     /// Serve the embedded web UI.
     pub ui_enabled: bool,
     /// Serve `/metrics` without a token.
@@ -981,6 +1028,7 @@ impl Default for AdminConfig {
             enabled: false,
             listen: SocketAddr::from(([127, 0, 0, 1], 9090)),
             token_hash: Redacted::default(),
+            readonly_token_hash: Redacted::default(),
             ui_enabled: true,
             metrics_public: false,
             max_body_bytes: 65536,
@@ -1124,6 +1172,9 @@ impl Config {
         if let Some(y) = &mut self.scan.yara {
             y.rules_dir = r("scan.yara.rules_dir", &y.rules_dir)?;
         }
+        for pl in &mut self.plugins {
+            pl.path = r("plugins.path", &pl.path)?;
+        }
         Ok(())
     }
 
@@ -1158,6 +1209,10 @@ impl Config {
                 "admin.token_hash",
                 "an argon2id hash is required when admin.enabled (D-55)",
             ));
+        }
+        let ro = &self.admin.readonly_token_hash.0;
+        if !ro.is_empty() && !crate::auth::is_argon2id_phc(ro) {
+            return Err(invalid("admin.readonly_token_hash", "must be an argon2id hash (O9)"));
         }
         if self.transparent.enabled {
             let t = &self.transparent;
@@ -1245,7 +1300,38 @@ impl Config {
             }
         }
         crate::profiles::PolicySet::build(self).map(|_| ()).map_err(|e| invalid("profiles", e))?;
-        self.validate_feeds_and_scan()
+        self.validate_feeds_and_scan()?;
+        self.validate_plugins()
+    }
+
+    /// `[[plugins]]` (O10): unique names, sane limits, and a binary that can run them.
+    fn validate_plugins(&self) -> Result<(), ConfigError> {
+        let mut names = std::collections::HashSet::new();
+        for p in &self.plugins {
+            let name_ok = (1..=32).contains(&p.name.len())
+                && p.name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b));
+            if !name_ok || !names.insert(p.name.as_str()) {
+                return Err(invalid("plugins.name", "unique, [a-z0-9_-]{1,32}"));
+            }
+            if !(1_000..=1_000_000_000).contains(&p.fuel) {
+                return Err(invalid("plugins.fuel", format!("{}: 1000..=1000000000", p.name)));
+            }
+            if !(65_536..=64 * 1024 * 1024).contains(&p.max_memory_bytes) {
+                return Err(invalid(
+                    "plugins.max_memory_bytes",
+                    format!("{}: 64 KiB..=64 MiB", p.name),
+                ));
+            }
+        }
+        if self.plugins.iter().any(|p| p.enabled) && !cfg!(feature = "plugins") {
+            return Err(invalid(
+                "plugins",
+                "this binary was built without the `plugins` feature (fail closed)",
+            ));
+        }
+        Ok(())
     }
 
     /// `[[feeds]]` and `[scan]` (D-52..D-54).

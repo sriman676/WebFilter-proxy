@@ -240,7 +240,7 @@ fn reason_names_match_serde() {
     for r in Reason::ALL {
         assert_eq!(serde_json::to_value(r).unwrap(), serde_json::json!(r.as_str()));
     }
-    assert_eq!(Reason::ALL.len(), 38);
+    assert_eq!(Reason::ALL.len(), 40);
 }
 
 // ---- auth ----

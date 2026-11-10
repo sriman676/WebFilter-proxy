@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "WebFilter Proxy",
+  "version": "1.1.0",
+  "description": "Status, recent blocks and a proxy toggle for a local WebFilter Proxy (loopback admin API, read-only).",
+  "minimum_chrome_version": "121",
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["common.js", "background.js"]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "webfilter-proxy@localhost",
+      "strict_min_version": "128.0"
+    }
+  },
+  "permissions": ["storage", "proxy", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "http://[::1]/*"],
+  "action": {
+    "default_title": "WebFilter Proxy",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}
