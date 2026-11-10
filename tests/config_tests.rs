@@ -378,3 +378,36 @@ fn pt_1_5_traversal_and_symlinked_paths_resolve_without_panic() {
         );
     }
 }
+
+/// Review 3 L2: options that are parsed but not implemented accept only their default, so an
+/// operator never believes e.g. `on_error = "block"` fails closed.
+#[test]
+fn rv3_l2_unimplemented_options_reject_non_defaults() {
+    let lab = Lab::new();
+    for (body, key) in [
+        ("on_error = \"block\"\n", "on_error"),
+        ("log_query_values = true\n", "log_query_values"),
+        ("upstream_keepalive = true\n", "upstream_keepalive"),
+    ] {
+        match parse_in(&lab, body) {
+            Err(ConfigError::Invalid { key: k, reason }) => {
+                assert_eq!(k, key);
+                assert!(reason.contains("not implemented"), "{reason}");
+            }
+            other => panic!("{body}: expected Invalid, got {other:?}"),
+        }
+    }
+    parse_in(&lab, "on_error = \"allow\"\nlog_query_values = false\nupstream_keepalive = false\n")
+        .unwrap();
+}
+
+/// Review 3 M2: `tls.ech_action` defaults to block and accepts only block | allow.
+#[test]
+fn rv3_m2_tls_ech_action_parses() {
+    use webfilter::config::EchAction;
+    let lab = Lab::new();
+    assert_eq!(parse_in(&lab, "").unwrap().tls.ech_action, EchAction::Block);
+    let allow = parse_in(&lab, "[tls]\nech_action = \"allow\"\n").unwrap();
+    assert_eq!(allow.tls.ech_action, EchAction::Allow);
+    parse_err(parse_in(&lab, "[tls]\nech_action = \"ip_only\"\n"));
+}

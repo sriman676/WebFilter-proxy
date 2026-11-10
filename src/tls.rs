@@ -61,6 +61,9 @@ fn current_uid() -> Option<u32> {
 
 /// Read a secret file safely: regular file (not a symlink), mode without group/other bits, owned
 /// by the current user; checks run on the opened handle so a swap after `lstat` is detected.
+///
+/// Limitation: on Windows only the regular-file/no-symlink check applies; ACLs and ownership are
+/// not inspected, so protect `tls.ca_dir` with NTFS permissions yourself (review 3 L5).
 pub fn read_private_file(path: &Path) -> Result<Zeroizing<String>, TlsError> {
     let link =
         std::fs::symlink_metadata(path).map_err(|e| ca_err(format!("{}: {e}", path.display())))?;
@@ -114,7 +117,8 @@ impl CaStore {
         (dir.join("ca.pem"), dir.join("ca.key"))
     }
 
-    /// Generate a new CA into `dir` (created 0700); refuses to overwrite an existing key.
+    /// Generate a new CA into `dir` (created 0700); refuses to overwrite an existing key and
+    /// refuses a symlinked or group/world-accessible `dir`.
     pub fn generate(dir: &Path) -> Result<Self, TlsError> {
         let (cert_path, key_path) = Self::paths(dir);
         if key_path.exists() || cert_path.exists() {
@@ -123,13 +127,16 @@ impl CaStore {
                 dir.display()
             )));
         }
-        std::fs::create_dir_all(dir).map_err(ca_err)?;
+        // Same rule as config validation (D-19, review 3 L5): an existing `ca_dir` must be a real
+        // directory (no symlink) without group/other bits; checked again after creation.
+        let private = |d: &Path| crate::config::check_private_dir("tls.ca_dir", d).map_err(ca_err);
+        private(dir)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(ca_err)?;
-        }
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(dir).map_err(ca_err)?;
+        private(dir)?;
         let key = KeyPair::generate().map_err(|e| TlsError::Cert(e.to_string()))?;
         let mut params = CertificateParams::new(Vec::<String>::new())
             .map_err(|e| TlsError::Cert(e.to_string()))?;
