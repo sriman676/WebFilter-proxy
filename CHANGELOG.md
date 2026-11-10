@@ -2,6 +2,15 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [v1.1.1] - 2026-11-10 - Patch: proxy host's own address refused on every port
+### Security
+- E-49 (found by the netns transparent-mode lab run): a client could reach other services on the proxy host
+  through the proxy's own non-loopback address (e.g. `10.200.0.1:80`), because the loop check required the
+  listener's port to match as well (self-SSRF). A listener's non-loopback address is now refused on every port
+  (`loop_detected`); loopback keeps the exact-port rule. Regression test `e49_own_host_address_refused_on_every_port`.
+### Changed
+- The netns e2e script prints the before/after difference when the teardown check (PT-7.8) fails.
+
 ## [v1.1.0] - 2026-11-10 - Release: final hardening, consolidated pentest, launch material
 ### Security (all findings fixed with regression tests first; none Critical/High)
 - Three independent code reviews (REVIEW-1..3) and one whole-codebase automated pentest (`just pentest-full`):
