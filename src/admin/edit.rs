@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::blocklist::{
@@ -108,10 +109,44 @@ pub fn versions(state: &Path, item: &str) -> Vec<String> {
     v.into_iter().map(|(_, n)| n).collect()
 }
 
+/// Serializes every edit, version and rollback (concurrent PUT/rollback, review L5).
+static EDIT_LOCK: Mutex<()> = Mutex::new(());
+
+fn edit_lock() -> MutexGuard<'static, ()> {
+    EDIT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Replace `path` atomically: a randomly named sibling created with `create_new` (never follows
+/// a planted file or symlink), with the original file's permissions (0600 for a new file),
+/// synced, then renamed into place.
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("wf-tmp");
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)
+    use std::io::Write as _;
+    let mut rnd = [0u8; 12];
+    getrandom::fill(&mut rnd).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.wf-tmp", hex::encode(rnd)));
+    let original = std::fs::metadata(path).ok().map(|m| m.permissions());
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp)?;
+    let written = (|| {
+        f.write_all(data)?;
+        if let Some(p) = original {
+            f.set_permissions(p)?;
+        }
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Keep a copy of the current content of `item` before it changes.
@@ -137,6 +172,7 @@ pub fn save_list(
     t: &ListTarget,
     text: &str,
 ) -> Result<usize, String> {
+    let _guard = edit_lock();
     let entries = validate(t.kind, text)?;
     let old = std::fs::read(&t.path).map_err(|e| format!("cannot read the list: {e}"))?;
     snapshot(state, &t.name, &old).map_err(|e| format!("cannot keep a version: {e}"))?;
@@ -155,6 +191,7 @@ pub fn rollback_list(
     lists: &BlocklistHandle,
     t: &ListTarget,
 ) -> Result<String, String> {
+    let _guard = edit_lock();
     let version = versions(state, &t.name).into_iter().next().ok_or("no earlier version")?;
     let path = versions_dir(state, &t.name).join(&version);
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -214,6 +251,7 @@ pub fn validate_settings(s: &Settings, cfg: &BlocklistConfig) -> Result<(), Stri
 
 /// Persist settings (the previous file is versioned first).
 pub fn save_settings(state: &Path, s: &Settings) -> Result<(), String> {
+    let _guard = edit_lock();
     std::fs::create_dir_all(state).map_err(|e| e.to_string())?;
     let path = state.join("settings.json");
     let old = std::fs::read(&path).unwrap_or_else(|_| b"{}".to_vec());
@@ -224,6 +262,7 @@ pub fn save_settings(state: &Path, s: &Settings) -> Result<(), String> {
 
 /// The newest kept settings version (consumed), for rollback.
 pub fn previous_settings(state: &Path) -> Result<Settings, String> {
+    let _guard = edit_lock();
     let version = versions(state, "settings").into_iter().next().ok_or("no earlier version")?;
     let path = versions_dir(state, "settings").join(&version);
     let s = serde_json::from_slice::<Settings>(&std::fs::read(&path).map_err(|e| e.to_string())?)

@@ -432,3 +432,74 @@ fn doctor_reports_without_secrets() {
     );
     assert!(results.iter().all(|(_, m)| !m.contains(token_hash()) && !m.contains("argon2id$")));
 }
+
+#[cfg(unix)]
+#[test]
+fn l5_settings_write_ignores_planted_temp_symlink_and_keeps_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    use webfilter::admin::edit::{previous_settings, save_settings};
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let victim = dir.path().join("victim.txt");
+    std::fs::write(&victim, "precious").unwrap();
+    // The old predictable temp names, planted as symlinks to a file outside the state dir.
+    std::os::unix::fs::symlink(&victim, state.join("settings.wf-tmp")).unwrap();
+    std::os::unix::fs::symlink(&victim, state.join(".settings.json.wf-tmp")).unwrap();
+    let settings = state.join("settings.json");
+    std::fs::write(&settings, "{}").unwrap();
+    std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let s = webfilter::profiles::Settings {
+        allow_domains: vec!["ok.test".into()],
+        ..Default::default()
+    };
+    save_settings(&state, &s).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "symlink not followed");
+    assert!(std::fs::read_to_string(&settings).unwrap().contains("ok.test"));
+    let mode = std::fs::metadata(&settings).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640, "original permissions preserved");
+    assert!(std::fs::symlink_metadata(&settings).unwrap().file_type().is_file());
+    // Rollback goes through the same writer.
+    previous_settings(&state).unwrap();
+    assert_eq!(std::fs::metadata(&settings).unwrap().permissions().mode() & 0o777, 0o640);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+    // No temp files are left behind.
+    let leftovers = std::fs::read_dir(&state)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.ends_with(".wf-tmp") && !n.starts_with("settings.wf") && n != ".settings.json.wf-tmp"
+        })
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[test]
+fn l5_concurrent_settings_saves_are_serialized() {
+    use webfilter::admin::edit::{save_settings, versions};
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                let s = webfilter::profiles::Settings {
+                    allow_domains: vec![format!("t{i}.test")],
+                    ..Default::default()
+                };
+                save_settings(&state, &s).unwrap();
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let v = versions(&state, "settings");
+    let mut unique = v.clone();
+    unique.dedup();
+    assert_eq!(v.len(), 8, "every save kept its own version: {v:?}");
+    assert_eq!(unique.len(), 8);
+    let text = std::fs::read_to_string(state.join("settings.json")).unwrap();
+    assert!(serde_json::from_str::<Value>(&text).is_ok(), "never a torn write");
+}
