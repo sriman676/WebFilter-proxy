@@ -662,3 +662,157 @@ async fn e81_robots_unreachable_disallows_and_redirect_offsite_not_followed() {
     assert_eq!(origin2.requests().len(), 2, "other.test never requested");
     p.stop().await;
 }
+
+// --- security review regressions (M4, L6) ---------------------------------------------------
+
+#[test]
+fn m4_css_sanitizer_is_linear() {
+    let css = "expression(".repeat(1_048_576 / "expression(".len());
+    let t0 = Instant::now();
+    let out = snapshot::rewrite_css(&css, &|_| None);
+    assert!(t0.elapsed() < Duration::from_secs(3), "took {:?}", t0.elapsed());
+    assert!(!out.to_ascii_lowercase().contains("expression("));
+    // Mixed case and every pattern still neutralized in one input.
+    let out = snapshot::rewrite_css(
+        "a{x:EXPRESSION(1);behaviour:url(a);BeHaViOr:url(b);-MOZ-binding:url(c);u:JavaScript:x}",
+        &|_| None,
+    )
+    .to_ascii_lowercase();
+    for bad in ["expression(", "behavior:", "behaviour:", "-moz-binding", "javascript:"] {
+        assert!(!out.contains(bad), "{bad} in {out}");
+    }
+    assert_eq!(snapshot::rewrite_css("p{color:red} é", &|_| None), "p{color:red} é");
+}
+
+/// The `Host:` port of a request (the origin serves every test host on one port).
+fn host_port(req: &[u8]) -> String {
+    String::from_utf8_lossy(req)
+        .to_ascii_lowercase()
+        .split("host: ")
+        .nth(1)
+        .and_then(|h| h.split(':').nth(1))
+        .and_then(|p| p.split('\r').next())
+        .unwrap_or("0")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn l6_snapshot_asset_redirect_off_site_is_omitted() {
+    let origin = Origin::start(|req| match path_of(req).as_str() {
+        "/page" => Reply::ok(r#"<html><body><img src="/a.png"><img src="/r.png"></body></html>"#),
+        "/r.png" => resp(
+            "302 Found",
+            "text/plain",
+            b"",
+            &format!("location: http://evil.com:{}/o.png\r\n", host_port(req)),
+        ),
+        _ => resp("200 OK", "image/png", PNG, ""),
+    })
+    .await;
+    let mut p = proxy(&[]).await;
+    let out = tempfile::tempdir().unwrap();
+    let url = format!("http://good.test:{}/page", origin.addr.port());
+    let r = client(p.addr, out.path(), &["--snapshot", "--retries", "0", "--json", &url]).await;
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let seen: Vec<String> = origin.requests().iter().map(|q| path_of(q.as_bytes())).collect();
+    assert!(!seen.iter().any(|s| s == "/o.png"), "off-site redirect followed: {seen:?}");
+    let j: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(j["snapshot_report"].as_str().unwrap()).unwrap())
+            .unwrap();
+    let omitted = report["omitted"].as_array().unwrap();
+    assert!(
+        omitted.iter().any(|o| o["url"].as_str().unwrap().ends_with("/r.png")
+            && o["reason"].as_str().unwrap().contains("redirect out of scope")),
+        "{report}"
+    );
+    assert_eq!(report["assets"], 1, "a.png kept: {report}");
+    p.stop().await;
+}
+
+#[tokio::test]
+async fn l6_crawl_redirect_to_robots_disallowed_path_not_fetched() {
+    let origin = Origin::start(|req| match path_of(req).as_str() {
+        "/robots.txt" => resp("200 OK", "text/plain", b"User-agent: *\nDisallow: /private\n", ""),
+        "/" => Reply::ok(r#"<a href="/go">go</a>"#),
+        "/go" => resp("302 Found", "text/html", b"", "location: /private/secret\r\n"),
+        _ => Reply::ok("<p>secret</p>"),
+    })
+    .await;
+    let mut p = proxy(&[]).await;
+    let out = tempfile::tempdir().unwrap();
+    let start = format!("http://good.test:{}/", origin.addr.port());
+    let r =
+        client(p.addr, out.path(), &["--crawl-depth", "1", "--retries", "0", "-v", &start]).await;
+    let seen: Vec<String> = origin.requests().iter().map(|q| path_of(q.as_bytes())).collect();
+    assert!(seen.contains(&"/go".to_owned()), "{seen:?}");
+    assert!(!seen.iter().any(|s| s.starts_with("/private")), "robots bypassed: {seen:?}");
+    assert!(
+        r.stderr.contains("/private/secret: robots.txt"),
+        "reported as robots skip: {}",
+        r.stderr
+    );
+    p.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn l6_part_files_never_written_through_symlinks() {
+    let body: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+    let origin = Origin::start(move |_| {
+        // Promise everything, deliver half, then close: the client keeps a partial.
+        let mut b = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\netag: \"v1\"\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        b.extend_from_slice(&body[..10_000]);
+        Reply::raw(b)
+    })
+    .await;
+    let mut p = proxy(&[]).await;
+    let out = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let url = format!("http://good.test:{}/big", origin.addr.port());
+    let name = webfilter::naming::output_filename(&url);
+    let victim = elsewhere.path().join("victim");
+    let victim_meta = elsewhere.path().join("victim.json");
+    std::fs::write(&victim, "keep").unwrap();
+    std::fs::write(&victim_meta, "keep").unwrap();
+    std::os::unix::fs::symlink(&victim, out.path().join(format!(".{name}.part"))).unwrap();
+    std::os::unix::fs::symlink(&victim_meta, out.path().join(format!(".{name}.part.json")))
+        .unwrap();
+    let r = client(p.addr, out.path(), &["--resume-partial", "--retries", "0", &url]).await;
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep", "written through .part link");
+    assert_eq!(
+        std::fs::read_to_string(&victim_meta).unwrap(),
+        "keep",
+        "written through .part.json link"
+    );
+    p.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn l6_snapshot_report_never_written_through_symlink() {
+    let origin = Origin::start(|req| match path_of(req).as_str() {
+        "/page" => Reply::ok(r#"<html><body><img src="/a.png"></body></html>"#),
+        _ => resp("200 OK", "image/png", PNG, ""),
+    })
+    .await;
+    let mut p = proxy(&[]).await;
+    let out = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let url = format!("http://good.test:{}/page", origin.addr.port());
+    let stem = webfilter::naming::output_filename(&url).trim_end_matches(".html").to_owned();
+    let victim = elsewhere.path().join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    let link = out.path().join(format!("{stem}_snapshot_report.json"));
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    let r = client(p.addr, out.path(), &["--snapshot", "--json", &url]).await;
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep", "{} {}", r.stdout, r.stderr);
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(r.stdout.contains("symlink"), "refusal reported: {}", r.stdout);
+    p.stop().await;
+}
