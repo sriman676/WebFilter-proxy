@@ -33,6 +33,7 @@ lint:
 
 test:
     cargo nextest run --locked --features insecure-test --no-tests=pass
+    cargo nextest run --locked --features insecure-test,plugins --test plugin_tests
     cargo test --locked --features insecure-test --doc
     python3 scripts/siem/siem_test.py
 
@@ -109,6 +110,8 @@ pentest-p12:
     scripts/pentest_p12.sh
 pentest-p13:
     scripts/pentest_p13.sh
+pentest-p14:
+    scripts/pentest_p14.sh
 
 # --- end-to-end and external suites (later phases) --------------------------------------
 # Offline end-to-end suites that drive the real proxy/client (E-xx; E-28/E-41/E-44..50 have own recipes).
@@ -137,6 +140,12 @@ promtool:
     scripts/promtool.sh
 ui-lint:
     python3 scripts/ui_lint.py
+# E-88: browser extension lint (permissions, CSP, text-only rendering, loopback-only URLs).
+ext-lint:
+    python3 scripts/ext_lint.py
+# E-84..E-86: WASM rule plugins (optional `plugins` feature).
+plugins-test:
+    cargo nextest run --locked --features insecure-test,plugins --test plugin_tests
 ui-e2e:
     python3 scripts/ui_e2e.py
 acceptance:

@@ -67,6 +67,8 @@ reasons! {
     MalwareDetected => "malware_detected",
     Unscannable => "unscannable",
     ScannerUnavailable => "scanner_unavailable",
+    PluginRule => "plugin_rule",
+    PluginError => "plugin_error",
     InternalError => "internal_error",
 }
 

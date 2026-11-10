@@ -13,7 +13,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 lol_html = "3.0.3"
 url = "2.5.8"
-webfilter = { path = ".." }
+webfilter = { path = "..", features = ["plugins"] }
 
 [[bin]]
 name = "config_toml"
@@ -158,6 +158,13 @@ bench = false
 [[bin]]
 name = "input_file"
 path = "fuzz_targets/input_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plugin_module"
+path = "fuzz_targets/plugin_module.rs"
 test = false
 doc = false
 bench = false

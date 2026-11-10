@@ -2,6 +2,15 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [phase-14-complete] - 2026-11-10 - Phase 14: browser extension and WASM rule plugins (pentest in the final run, A-29)
+### Added
+- `extension/`: Chrome/Firefox MV3 extension (badge, recent blocks, request access, proxy toggle) using the
+  admin API read-only; `just ext-lint`.
+- `[admin] readonly_token_hash`: a token that can only read (O9).
+- Rule plugins behind the `plugins` feature: wasmtime sandbox with fuel, memory limits and no imports, fresh
+  instance per call, `on_error` fail closed by default, `/api/v1/plugins` and plugin metrics; example
+  `plugins/examples/block_keyword.wat`; `just plugins-test`, fuzz target F-23, `just pentest-p14`.
+
 ## [phase-13-complete] - 2026-11-10 - Phase 13: final v1.1 regression (pentest in the final run, A-29)
 ### Added
 - `tests/interaction_tests.rs` (E-83 feature interactions, PT-13.3 upgrade path) and an h2 x limits test.

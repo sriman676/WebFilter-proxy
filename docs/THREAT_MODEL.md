@@ -83,5 +83,7 @@ B5 log files -> SIEM (Fluent Bit -> OpenSearch), B6 client program -> filesystem
 | T-71 | D/E | Crawl traps, robots violations, scope escape | D-62 | E-81, PT-12.5 |
 | T-72 | E | Feature interaction regressions | D-63 | E-83, PT-13.2 |
 | T-73 | I | Privacy exposure: over-collection, interception of sensitive categories, long retention | D-68, passthrough defaults, no secrets in logs | E-30, PT-5.2 |
+| T-75 | S/E/I | Browser extension misuse: admin token theft, over-broad permissions, hostile data rendered as code | O9, read-only token | E-87, E-88, PT-14.1, PT-14.3 |
+| T-76 | D/E/T | Malicious or buggy rule plugin: sandbox escape, CPU/memory exhaustion, filter bypass | O10 | E-85, E-86, PT-14.4, PT-14.6 |
 | T-74 | D | File-descriptor exhaustion or clock skew degrading service and certificates | D-67 | PT-8.3, E-24 |
 

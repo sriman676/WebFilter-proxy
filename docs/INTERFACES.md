@@ -149,7 +149,7 @@ sni_mismatch, parser_differential, invalid_request, userinfo_in_url, port_not_al
 loop_detected, auth_required, auth_failed, rate_limited, upstream_cert_invalid, upstream_error, timeout,
 too_many_connections, non_tls_on_connect, method_not_allowed, h2_protocol_error, h2_flood, orig_dst_failed,
 no_sni, ech_blocked, quota_exceeded, feed_domain, feed_url, feed_ip, hash_blocklist, malware_detected,
-unscannable, scanner_unavailable, internal_error, none.
+unscannable, scanner_unavailable, plugin_rule, plugin_error, internal_error, none.
 
 ## Error handling conventions
 `thiserror` enums per module, `anyhow` only in binaries. No panics on external input. Every fallible

@@ -18,6 +18,7 @@ pub mod limiter;
 pub mod logger;
 pub mod naming;
 pub mod normalize;
+pub mod plugins;
 pub mod policy;
 pub mod profiles;
 pub mod proxy;

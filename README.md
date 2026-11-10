@@ -54,6 +54,15 @@ webfilter-client --crawl-depth 2 --max-pages 50 https://example.com # -> output/
 - Every request still goes through the proxy, so filters, limits and scans apply; a summary line reports
   `pages`, `assets`, `blocked`, `skipped` and `retries`. `--json` adds `attempts`, `snapshot_report`, `crawl_depth`.
 
+## Browser extension and rule plugins (v1.1, optional)
+- `extension/`: a Chrome/Firefox (Manifest V3) extension with a status badge, the last blocks, "request access"
+  and a proxy on/off toggle. It reads the loopback admin API with a read-only token
+  (`[admin] readonly_token_hash`) and cannot change anything. Load it unpacked; see `extension/README.md`.
+- Rule plugins: small WebAssembly modules that can add blocks (`cargo build --release --features plugins`,
+  then `[[plugins]]` in the config; example `plugins/examples/block_keyword.wat`). Each call runs in a fresh
+  sandbox with fuel and memory limits and no imports; errors block by default (`on_error`). Plugins never
+  override the allowlist, feeds, scanning or the destination policy.
+
 ## Customization
 - Lists: `blocklists/*.txt` (hot-reloaded); test a URL with `webfilter-proxy blocklist test <url>`.
 - Categories with schedules: `[[blocklists.categories]]` with `active = ["Mon-Fri 09:00-17:00"]` (A-27).

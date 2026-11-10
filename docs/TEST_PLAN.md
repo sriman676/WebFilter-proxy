@@ -40,7 +40,7 @@ Corpus-driven tests (table-driven, must pass): `url_bypass_cases.tsv`, `filename
 ## 4. Fuzz targets (`fuzz/`, nightly; smoke 60 s each in CI, 10 min each at pentest gates)
 F-08 `response_head`, F-09 `chunked_codec` (round-trip + malformed), plus F-01 `normalize` (raw target strings), F-02 `blocklist_parse`, F-03 `naming`, F-04 `request_head`
 (raw bytes into the HTTP head validator), F-05 `client_url`, F-06 `redirect_location`, F-07 `config_toml`.
-F-13 `profiles_config`, F-14 `feed_parsers`, F-15 `clamd_reply`, F-16 `content_disposition`, F-17 `admin_router`, F-18 `form_body`, F-19 `html_rewrite`, F-20 `css_urls`, F-21 `robots`, F-22 `input_file`, plus F-10 `h2_frames` (frame sequences vs FloodGuard + validators), F-11 `client_hello` (TLS ClientHello/SNI/ECH parser), F-12 `transparent_http_head`.
+F-13 `profiles_config`, F-14 `feed_parsers`, F-15 `clamd_reply`, F-16 `content_disposition`, F-17 `admin_router`, F-18 `form_body`, F-19 `html_rewrite`, F-20 `css_urls`, F-21 `robots`, F-22 `input_file`, F-23 `plugin_module` (arbitrary bytes as a module: refused or contained), plus F-10 `h2_frames` (frame sequences vs FloodGuard + validators), F-11 `client_hello` (TLS ClientHello/SNI/ECH parser), F-12 `transparent_http_head`.
 Seed corpora from `tests/corpus/*`.
 
 ## 4b. Differential tests (X-xx, cross-parser)
@@ -150,6 +150,11 @@ I-transparent-http / I-transparent-tls: full transparent flows using `FixedOrigi
 | E-81 | crawl depth/page caps, robots, traps | contained and reported |
 | E-82 | snapshot/crawl through proxy with blocked assets and 429s | omitted and reported; backoff |
 | E-83 | feature interaction pairs (profiles, scan, feeds, h2, transparent, access requests) | no safety bypass |
+| E-84 | rule plugin blocks by request view; no-opinion passes; log fields; monitor mode | `plugin:<name>` rule id |
+| E-85 | hostile plugins: infinite loop, memory bomb, trap, imports, bad exports, out-of-bounds pointer, bad result | refused at load or contained; `on_error` honored |
+| E-86 | plugins vs allowlist, temp allows, feeds, scanning, destination policy | plugins only ever add blocks |
+| E-87 | read-only admin token | GET and metrics work; every state change 403 and audited |
+| E-88 | browser extension lint (permissions, CSP, no remote code, text-only rendering, loopback-only URLs) | `just ext-lint` passes |
 
 ## 6b. Real-world compatibility (C-xx; Phase 8, local only)
 C-01 curl (http, https tunnel, intercepted with CA) ; C-02 wget ; C-03 Python `requests` via `HTTPS_PROXY` ; C-04 `git ls-remote`

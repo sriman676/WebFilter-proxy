@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>WebFilter Proxy</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="common.js" defer></script>
+  <script src="popup.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>WebFilter Proxy</h1>
+    <label class="switch" title="Route this browser through the proxy">
+      <input type="checkbox" id="proxy-toggle">
+      <span>Use proxy</span>
+    </label>
+  </header>
+
+  <section id="error" class="error" hidden>
+    <p id="error-text"></p>
+    <button type="button" id="open-options">Open options</button>
+  </section>
+
+  <p id="proxy-msg" class="msg" hidden></p>
+
+  <section id="status" hidden>
+    <dl class="stats">
+      <dt>Mode</dt><dd id="s-mode"></dd>
+      <dt>Requests</dt><dd id="s-requests"></dd>
+      <dt>Blocked</dt><dd id="s-blocked"></dd>
+      <dt>Blocked since start</dt><dd id="s-since"></dd>
+      <dt>Active connections</dt><dd id="s-active"></dd>
+    </dl>
+    <h2>Last 10 blocks</h2>
+    <p id="no-blocks" class="muted" hidden>No blocked requests.</p>
+    <ul id="blocks"></ul>
+  </section>
+</body>
+</html>

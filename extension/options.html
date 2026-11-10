@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>WebFilter Proxy options</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="common.js" defer></script>
+  <script src="options.js" defer></script>
+</head>
+<body class="options">
+  <h1>WebFilter Proxy options</h1>
+  <p>This extension only talks to the proxy's loopback admin API, with GET requests. Use the <strong>read-only</strong>
+    token whose argon2id hash is set as <code>readonly_token_hash</code> in the <code>[admin]</code> section of the
+    proxy config (create it with <code>webfilter-proxy hash-password</code>). Never use the full admin token here.</p>
+  <form id="form" autocomplete="off" novalidate>
+    <p>
+      <label for="admin-url">Admin URL (http, loopback host, explicit port)</label><br>
+      <input id="admin-url" type="text" size="40" placeholder="http://127.0.0.1:9090" spellcheck="false">
+    </p>
+    <p>
+      <label for="token">Read-only token</label><br>
+      <input id="token" type="password" size="40" autocomplete="off" spellcheck="false">
+      <br><span id="token-state" class="muted"></span>
+    </p>
+    <p>
+      <label for="proxy">Proxy host:port (loopback only)</label><br>
+      <input id="proxy" type="text" size="40" placeholder="127.0.0.1:8080" spellcheck="false">
+    </p>
+    <p><button type="submit">Save</button></p>
+  </form>
+  <p id="result" role="status"></p>
+</body>
+</html>

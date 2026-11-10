@@ -250,6 +250,8 @@ pub enum SysEvent {
     TempAllowAdded,
     TempAllowExpired,
     PolicyReloaded,
+    PluginsLoaded,
+    PluginError,
     H2Flood,
     OrigDstFailed,
     InsecurePermissions,

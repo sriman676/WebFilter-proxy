@@ -165,6 +165,7 @@ orig_dst = "so_original_dst"     # so_original_dst | conntrack
 enabled = false
 listen = "127.0.0.1:9090"           # loopback only
 token_hash = ""                     # argon2id hash (webfilter-proxy hash-password)
+readonly_token_hash = ""            # optional read-only token for the browser extension (GET only)
 ui_enabled = true
 metrics_public = false
 max_body_bytes = 65536
@@ -181,3 +182,13 @@ per_client_per_hour = 3
 
 [state]
 dir = "../state"
+
+# WASM rule plugins (Phase 14, O10): need a binary built with `--features plugins`. Plugins can only add
+# blocks; they get a JSON view of the request (no query values, headers, bodies or client identity).
+# [[plugins]]
+# name = "ads"
+# path = "../plugins/examples/block_keyword.wat"
+# enabled = false
+# fuel = 1000000
+# max_memory_bytes = 1048576
+# on_error = "block"                # or "allow"
