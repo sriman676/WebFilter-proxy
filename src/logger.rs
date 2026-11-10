@@ -180,6 +180,7 @@ const DEFAULT_CAP: usize = 2048;
 
 impl RequestEvent {
     /// Apply LOG_SCHEMA caps and control-character stripping to every free-text field.
+    /// Idempotent: a second pass leaves the event unchanged.
     pub fn sanitize(&mut self) {
         for s in [
             &mut self.src_ip,
