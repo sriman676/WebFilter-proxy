@@ -260,6 +260,40 @@ pub fn next_hop(current: &Url, location: &str) -> Result<Url, ClientError> {
     }
 }
 
+/// Replace `path` with `data` without following a symlink: refuses when `path` is a symlink,
+/// writes a fresh `create_new` temp file in the same directory and renames it over `path`
+/// (review L6). A planted link is never written through and never left half-written.
+pub fn replace_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::other(format!(
+            "{} is a symlink; refusing to write through it",
+            path.display()
+        )));
+    }
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let mut r = [0u8; 8];
+    let _ = getrandom::fill(&mut r);
+    let temp = dir.join(format!(
+        ".{name}.{}-{}-{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+        hex::encode(r)
+    ));
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        std::io::Write::write_all(&mut f, data)?;
+        f.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
 fn tls_config(extra: &[PathBuf]) -> Result<Arc<rustls::ClientConfig>, ClientError> {
     let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
     for path in extra {
@@ -485,8 +519,8 @@ impl Client {
         {
             let (part, meta) = self.part_paths(name);
             let m = serde_json::json!({ "url": url.as_str(), "etag": p.etag, "last_modified": p.last_modified });
-            let _ =
-                std::fs::write(&part, &p.data).and_then(|()| std::fs::write(&meta, m.to_string()));
+            let _ = replace_file(&part, &p.data)
+                .and_then(|()| replace_file(&meta, m.to_string().as_bytes()));
         }
     }
 
@@ -632,7 +666,9 @@ impl Client {
                 omit(&mut omitted, &url, "cross-site", None);
                 continue;
             }
-            let (r, _) = self.get(&url, &[]).await;
+            // Redirects must stay in the snapshot scope too (review L6).
+            let scope = |u: &Url| snap::same_site(page, u, &opts.extra_hosts);
+            let (r, _) = self.get_within(&url, &[], &scope).await;
             let (status, headers, body) = match r {
                 Ok(Outcome::Ok { status, headers, body, .. }) => (status, headers, body),
                 Ok(Outcome::Blocked { info, .. }) => {
@@ -709,12 +745,11 @@ impl Client {
             std::io::Write::write_all(&mut f, &data).map_err(io)?;
         }
         let page_html = snap::rewrite(html, page, &map, opts.allow_scripts);
-        std::fs::write(saved, page_html).map_err(io)?;
+        replace_file(saved, page_html.as_bytes()).map_err(io)?;
         let report = dir.join(format!("{stem}_snapshot_report.json"));
         let json =
             serde_json::json!({ "page": page.as_str(), "assets": map.len(), "omitted": omitted });
-        std::fs::write(&report, serde_json::to_vec_pretty(&json).unwrap_or_default())
-            .map_err(io)?;
+        replace_file(&report, &serde_json::to_vec_pretty(&json).unwrap_or_default()).map_err(io)?;
         Ok(report)
     }
 

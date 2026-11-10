@@ -461,7 +461,9 @@ impl Fetcher {
     ) -> Result<Fetched, FeedError> {
         let fail = |e: &str| FeedError::Fetch(e.to_owned());
         let first = url::Url::parse(url).map_err(|_| fail("invalid URL"))?;
-        let first_host = first.host_str().map(str::to_ascii_lowercase);
+        // Credentials and validators go only to the configured origin (scheme + host + port),
+        // never to the same hostname on another port or scheme (review L7).
+        let first_origin = first.origin();
         let mut current = first;
         for _ in 0..=3 {
             if current.scheme() != "https" {
@@ -508,7 +510,7 @@ impl Fetcher {
                 .header("user-agent", UA)
                 .header("accept-encoding", "identity")
                 .header("connection", "close");
-            if Some(&host) == first_host.as_ref() {
+            if current.origin() == first_origin && first_origin.is_tuple() {
                 if let Some(key) = api_key {
                     req = req.header("auth-key", key);
                 }
