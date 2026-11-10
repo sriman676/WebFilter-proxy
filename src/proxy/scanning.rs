@@ -11,9 +11,9 @@ use tokio::time::{Instant, timeout};
 
 use super::ProxyDeps;
 use super::http1::{
-    BodyFraming, ChunkedDecoder, ResponseHead, forward_headers, single, write_head,
+    BodyFraming, ChunkedDecoder, ResponseHead, forward_headers, values, write_head,
 };
-use super::io::{IoError, copy_body_tap, fill};
+use super::io::{BodyState, IoError, copy_body_resume, copy_body_tap, fill};
 use super::pipeline::{
     Fail, Outcome, UpstreamBox, client_gone, note_decision, send_block, upstream_fail, write_all,
 };
@@ -22,7 +22,7 @@ use crate::filter::Decision;
 use crate::logger::{RequestEvent, SysEvent};
 use crate::profiles::Profile;
 use crate::reason::Reason;
-use crate::scan::{Scanner, Slot, Verdict};
+use crate::scan::{Scanner, Slot, Verdict, content_encoded};
 
 /// Bytes inspected for magic numbers.
 pub const PREFIX: usize = 512;
@@ -113,13 +113,13 @@ pub(crate) fn malware_event(deps: &ProxyDeps, ev: &RequestEvent) {
 }
 
 /// Why this response cannot be scanned before reading it (P4).
+/// `encoded` is [`content_encoded`] over every `Content-Encoding` header.
 pub(crate) fn known_unscannable(
     status: u16,
-    encoding: Option<&[u8]>,
+    encoded: bool,
     length: Option<u64>,
     max: u64,
 ) -> Option<&'static str> {
-    let encoded = encoding.is_some_and(|v| !v.eq_ignore_ascii_case(b"identity"));
     if status == 206 {
         Some("partial content (206)")
     } else if encoded {
@@ -163,8 +163,8 @@ where
         BodyFraming::ContentLength(n) => Some(n),
         _ => None,
     };
-    let encoding = single(&resp.headers, "content-encoding");
-    let early = known_unscannable(resp.status, encoding, length, scanner.cfg.max_bytes);
+    let encoded = content_encoded(values(&resp.headers, "content-encoding"));
+    let early = known_unscannable(resp.status, encoded, length, scanner.cfg.max_bytes);
     let mut slot = match early {
         Some(why) => Err(Verdict::Unscannable(why)),
         None => scanner.begin().await.map_err(Verdict::Unscannable),
@@ -208,6 +208,8 @@ where
     let Ok(slot_ref) = slot.as_mut() else { return Err(client_gone()) };
     let mut held = Vec::new(); // the chunk that crossed max_bytes/quota, kept for `allow`
     let limit = Duration::from_secs(scanner.cfg.buffer_timeout_secs);
+    // One framing state across buffering and the allowed remainder (review L2).
+    let mut state = BodyState::new(framing, false);
     let buffered = {
         let mut tap = |c: &[u8]| {
             let ok = slot_ref.write(c).is_ok();
@@ -219,12 +221,11 @@ where
         let mut sink = tokio::io::sink();
         timeout(
             limit,
-            copy_body_tap(
+            copy_body_resume(
                 &mut upstream,
                 &mut up_buf,
                 &mut sink,
-                framing,
-                false,
+                &mut state,
                 idle,
                 false,
                 &mut tap,
@@ -268,12 +269,11 @@ where
     if !complete {
         write_all(client, &held, idle).await.map_err(|_| client_gone())?;
         sent += held.len() as u64;
-        sent += copy_body_tap(
+        sent += copy_body_resume(
             &mut upstream,
             &mut up_buf,
             client,
-            framing,
-            false,
+            &mut state,
             idle,
             false,
             &mut |_| true,

@@ -23,6 +23,16 @@ const TEMP_PREFIX: &str = "wfscan-";
 const MAX_REPLY: usize = 1024;
 /// How long a download waits for a scan slot before it is unscannable.
 const QUEUE_WAIT: Duration = Duration::from_secs(5);
+/// Compressed page types that are not download candidates merely for being encoded (A-47).
+const PAGE_TYPES: &[&str] = &[
+    "text/html",
+    "application/xhtml+xml",
+    "text/css",
+    "text/javascript",
+    "application/javascript",
+    "application/json",
+    "image/svg+xml",
+];
 
 /// The scan result of one download.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,19 +93,87 @@ pub fn parse_clamd_reply(reply: &str) -> Result<Option<String>, &'static str> {
     Err("clamd error reply")
 }
 
+/// `Content-Disposition` parameters split on `;` outside quoted strings.
+fn disposition_params(cd: &str) -> Vec<&str> {
+    let (mut parts, mut start, mut quoted, mut escaped) = (Vec::new(), 0, false, false);
+    for (i, c) in cd.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                parts.push(cd.get(start..i).unwrap_or(""));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(cd.get(start..).unwrap_or(""));
+    parts
+}
+
+/// Every `filename=` / `filename*=` value of a `Content-Disposition` header, unquoted (the
+/// RFC 5987 charset prefix removed; `filename*` stays percent-encoded).
+fn disposition_filenames(cd: &str) -> impl Iterator<Item = (bool, String)> + '_ {
+    disposition_params(cd).into_iter().filter_map(|part| {
+        let (k, v) = part.trim().split_once('=')?;
+        let k = k.trim().to_ascii_lowercase();
+        if k != "filename" && k != "filename*" {
+            return None;
+        }
+        let v = v.trim();
+        let v = match v.strip_prefix('"') {
+            Some(inner) => {
+                let inner = inner.strip_suffix('"').unwrap_or(inner);
+                let mut out = String::with_capacity(inner.len());
+                let mut chars = inner.chars();
+                while let Some(c) = chars.next() {
+                    out.push(if c == '\\' { chars.next().unwrap_or('\\') } else { c });
+                }
+                out
+            }
+            None => v.to_owned(),
+        };
+        let v = v.rsplit_once("''").map_or(v.as_str(), |(_, rest)| rest).to_owned();
+        Some((k == "filename*", v))
+    })
+}
+
+/// Lossy percent-decoding (only for matching extensions, never for paths).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        let hex = b.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok());
+        match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+            Some(v) if c == b'%' => {
+                out.push(v);
+                i += 3;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether the `Content-Encoding` header values name anything but `identity` (any header,
+/// any list member; an empty value counts as encoded). Encoded bodies are unscannable (P4).
+pub fn content_encoded<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> bool {
+    values
+        .into_iter()
+        .flat_map(|v| v.split(|b| *b == b','))
+        .any(|t| !t.trim_ascii().eq_ignore_ascii_case(b"identity"))
+}
+
 /// The download name from `Content-Disposition` (`filename=`) or the URL path: control
 /// characters and separators removed, <= 128 chars, never used as a path (F-16).
 pub fn download_name(content_disposition: Option<&str>, path: &str) -> String {
-    let from_header = content_disposition.and_then(|cd| {
-        cd.split(';').find_map(|part| {
-            let (k, v) = part.trim().split_once('=')?;
-            let k = k.trim().to_ascii_lowercase();
-            (k == "filename" || k == "filename*").then(|| {
-                let v = v.trim().trim_matches('"');
-                v.rsplit_once("''").map_or(v, |(_, rest)| rest).to_owned()
-            })
-        })
-    });
+    let from_header =
+        content_disposition.and_then(|cd| disposition_filenames(cd).next().map(|(_, v)| v));
     let raw = from_header.unwrap_or_else(|| path.rsplit('/').next().unwrap_or("").to_owned());
     let clean: String =
         raw.chars().filter(|c| !c.is_control() && !"/\\:*?\"<>|".contains(*c)).take(128).collect();
@@ -154,6 +232,21 @@ impl HashList {
     }
 }
 
+/// What eligibility looks at for one 2xx GET response.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Download<'a> {
+    /// The request path (no query).
+    pub path: &'a str,
+    /// The response `Content-Type`.
+    pub content_type: Option<&'a str>,
+    /// Every `Content-Disposition` header value.
+    pub dispositions: &'a [String],
+    /// Any non-identity `Content-Encoding` ([`content_encoded`]).
+    pub encoded: bool,
+    /// The first decoded payload bytes (up to 512).
+    pub prefix: &'a [u8],
+}
+
 /// The scanning service (INTERFACES `ScanPipeline`).
 pub struct Scanner {
     /// `[scan]`.
@@ -205,18 +298,34 @@ impl Scanner {
         })
     }
 
-    /// Eligible by extension, media type or magic bytes (P4).
-    pub fn eligible(&self, path: &str, content_type: Option<&str>, prefix: &[u8]) -> bool {
-        let last = path.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
-        let ext = self.cfg.extensions.iter().any(|e| {
+    /// Whether a file name ends with an eligible extension (case-insensitive; trailing dots,
+    /// whitespace and control characters ignored, as Windows does).
+    fn eligible_name(&self, name: &str) -> bool {
+        let name = name
+            .trim_end_matches(|c: char| c == '.' || c.is_whitespace() || c.is_control())
+            .to_ascii_lowercase();
+        self.cfg.extensions.iter().any(|e| {
             let e = e.trim().to_ascii_lowercase();
-            e.len() > 1 && last.ends_with(&e)
-        });
+            e.len() > 1 && name.ends_with(&e)
+        })
+    }
+
+    /// Eligible by URL or `Content-Disposition` extension, media type, any non-identity
+    /// `Content-Encoding` (then unscannable) or magic bytes (P4, review M1).
+    pub fn eligible(&self, d: &Download<'_>) -> bool {
+        let ext = self.eligible_name(d.path.rsplit('/').next().unwrap_or(""))
+            || d.dispositions.iter().flat_map(|cd| disposition_filenames(cd)).any(|(star, v)| {
+                self.eligible_name(&v) || (star && self.eligible_name(&percent_decode(&v)))
+            });
         let media =
-            content_type.map(|c| c.split(';').next().unwrap_or("").trim().to_ascii_lowercase());
+            d.content_type.map(|c| c.split(';').next().unwrap_or("").trim().to_ascii_lowercase());
         let ctype = media
-            .is_some_and(|m| self.cfg.content_types.iter().any(|c| c.eq_ignore_ascii_case(&m)));
-        ext || ctype || (self.cfg.magic && magic(prefix))
+            .as_deref()
+            .is_some_and(|m| self.cfg.content_types.iter().any(|c| c.eq_ignore_ascii_case(m)));
+        // An encoded body hides its magic bytes: treat it as a download candidate (and so as
+        // unscannable) unless it is an ordinary compressed page type (A-47).
+        let page = media.as_deref().is_some_and(|m| PAGE_TYPES.contains(&m));
+        ext || ctype || (d.encoded && !page) || (self.cfg.magic && magic(d.prefix))
     }
 
     /// A scan slot with a fresh 0600 temp file, or why not (concurrency queue <= 5 s).

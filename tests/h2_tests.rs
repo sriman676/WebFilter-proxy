@@ -34,6 +34,13 @@ struct H2Origin {
     seen: Seen,
 }
 
+/// An MZ file carrying the EICAR string (sent as text/plain from `/split`).
+fn split_body() -> Vec<u8> {
+    let mut v = b"MZ".to_vec();
+    v.extend_from_slice(&common::eicar());
+    v
+}
+
 fn body_for(path: &str) -> Vec<u8> {
     match path.strip_prefix("/big/") {
         Some(n) => (0..n.parse::<usize>().unwrap()).map(|i| (i % 251) as u8).collect(),
@@ -70,6 +77,13 @@ async fn serve_h2<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(tls: 
                 resp = resp.header("x-webfilter-action", "blocked");
             }
             let mut s = respond.send_response(resp.body(()).unwrap(), false).unwrap();
+            if path == "/split" {
+                // Review M1: a 1-byte first DATA frame must not hide the MZ magic.
+                let _ = s.send_data(Bytes::from_static(b"M"), false);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                send_all(&mut s, Bytes::from(split_body()[1..].to_vec())).await;
+                return;
+            }
             send_all(&mut s, Bytes::from(body_for(&path))).await;
         });
     }
@@ -425,6 +439,33 @@ async fn h2_response_content_type_rule_blocks() {
     assert!(!body.starts_with(b"hello"), "the origin body is never forwarded");
     drop(send);
     l.proxy.stop().await;
+}
+
+#[tokio::test]
+async fn review_m1_h2_split_first_frame_still_scanned() {
+    let clamd = common::fake_clamd().await;
+    let mut l = lab(
+        &format!(
+            "[rules]\nblocked_extensions = []\n[scan]\nenabled = true\nmode = \"block\"\ntemp_dir = \"scan_tmp\"\n[scan.clamd]\naddress = \"tcp:127.0.0.1:{clamd}\"\n[[profiles]]\nname = \"default\"\nscan_downloads = true\n"
+        ),
+        &[],
+        BOTH,
+    )
+    .await;
+    let send = h2_client(&l, None).await;
+    let (st, h, body) = fetch(&send, get(l.origin.port, "/split")).await.unwrap();
+    assert_eq!(st, 403, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(h["x-webfilter-reason"].to_str().unwrap(), "malware_detected");
+    assert!(!body.windows(5).any(|w| w == b"EICAR"), "the body is never forwarded");
+    // A non-eligible page still streams unchanged.
+    let (st, _, body) = fetch(&send, get(l.origin.port, "/page")).await.unwrap();
+    assert_eq!((st, body.as_slice()), (200, &b"hello /page"[..]));
+    drop(send);
+    l.proxy.stop().await;
+    let lines: Vec<_> =
+        l.proxy.log_lines().into_iter().filter(|v| v["http_method"] == "GET").collect();
+    assert_eq!(lines[0]["scan_status"], "infected");
+    assert_eq!(lines[0]["body_sha256"], hex::encode(Sha256::digest(split_body())));
 }
 
 // ------------------------------------------------------------------------------------ I-h2-flood
