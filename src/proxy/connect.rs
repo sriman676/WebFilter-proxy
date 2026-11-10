@@ -19,6 +19,7 @@ use super::pipeline::{
     note_decision, note_target, resolve, resolved_rule, send_block, send_limit, serve_connection,
     upstream_tls, write_all,
 };
+use crate::config::EchAction;
 use crate::filter::{Action, Phase};
 use crate::logger::RequestEvent;
 use crate::normalize::{NormalizedTarget, TargetContext, canonicalize};
@@ -142,9 +143,10 @@ where
 const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
 /// Passthrough (SPEC 4.9): answer 200, peek the ClientHello (bounded, with the handshake
-/// timeout) and apply the SNI rule (D-22, review 2 M3), then relay with the peeked bytes sent
-/// upstream first. Non-TLS bytes are refused per `block_non_tls_connect` when interception is
-/// enabled (a passthrough domain); with interception off they are tunneled as before (4.9).
+/// timeout) and apply the SNI rule (D-22, review 2 M3) even when ECH is present, then
+/// `tls.ech_action` (review 3 M2, A-51), then relay with the peeked bytes sent upstream first.
+/// Non-TLS bytes are refused per `block_non_tls_connect` when interception is enabled (a
+/// passthrough domain); with interception off they are tunneled as before (4.9).
 async fn passthrough_tunnel<S, U>(
     client: &mut S,
     buf: &mut Vec<u8>,
@@ -164,7 +166,17 @@ where
         Some(hello) => {
             ev.tls_sni.clone_from(&hello.sni);
             ev.ech_present = hello.ech_present;
-            check_sni(&hello, t, ev)?;
+            // The bytes go to the CONNECT host's IP unread, so an ECH extension (real or junk)
+            // must not exempt the outer SNI from the comparison (review 3 M2).
+            check_sni(&hello, t, ev, false)?;
+            if hello.ech_present && deps.cfg.tls.ech_action == EchAction::Block {
+                ev.action = Action::Block.as_str();
+                return Err(Fail {
+                    status: None,
+                    reason: Reason::EchBlocked,
+                    error: "ECH hides the server name (R-05)",
+                });
+            }
         }
         None if deps.cfg.block_non_tls_connect && deps.leaves.is_some() => {
             return Err(non_tls(ev));
@@ -181,16 +193,19 @@ fn non_tls(ev: &mut RequestEvent) -> Fail {
 }
 
 /// D-22: a present SNI must name the CONNECT host (case-insensitive, trailing dot ignored).
-/// With ECH the outer SNI is a cover name and is not compared.
+/// With `ech_exempts` (interception only, D-21) an ECH outer SNI is a cover name and is not
+/// compared; passthrough always compares (review 3 M2).
 fn check_sni(
     hello: &ClientHelloInfo,
     t: &NormalizedTarget,
     ev: &mut RequestEvent,
+    ech_exempts: bool,
 ) -> Result<(), Fail> {
     let connect_host = t.host.to_string();
     let connect_host =
         connect_host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
-    if !hello.ech_present
+    let exempt = ech_exempts && hello.ech_present;
+    if !exempt
         && let Some(sni) = &hello.sni
         && !sni.trim_end_matches('.').eq_ignore_ascii_case(connect_host)
     {
@@ -288,7 +303,7 @@ where
         ev.dest_ip = Some(ip.to_string());
         return open_tunnel(client, buf, &mut upstream, b"", ev, deps).await;
     };
-    check_sni(&hello, &t, ev)?;
+    check_sni(&hello, &t, ev, true)?;
     let tunnel = Tunnel {
         host: t.host,
         port: t.port,

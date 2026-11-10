@@ -77,11 +77,13 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Tokio worker threads; 0 = number of CPUs (D-04).
     pub worker_threads: usize,
-    /// Filter internal-error behaviour.
+    /// Filter internal-error behaviour. Not implemented: only the default `allow` is accepted
+    /// (review 3 L2, A-51).
     pub on_error: OnError,
-    /// Log query values (D-18; default false).
+    /// Log query values (D-18; default false). Not implemented: only `false` is accepted (A-51).
     pub log_query_values: bool,
     /// Reuse upstream connections for the same client connection and authority only (D-07).
+    /// Not implemented: only `false` is accepted (A-51).
     pub upstream_keepalive: bool,
     /// Reject CONNECT tunnels that do not start with TLS.
     pub block_non_tls_connect: bool,
@@ -477,6 +479,20 @@ pub struct TlsConfig {
     pub passthrough_domains: Vec<String>,
     /// Optional extra upstream roots (PEM); empty = none. Verification is always on (D-20).
     pub upstream_ca_bundle: PathBuf,
+    /// Whether ECH ClientHellos are tunnelled on explicit CONNECT passthrough (review 3 M2).
+    pub ech_action: EchAction,
+}
+
+/// Action for a ClientHello carrying ECH on an explicit CONNECT passthrough tunnel (A-51).
+/// The outer SNI is compared with the CONNECT host either way (D-22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EchAction {
+    /// Close the tunnel (`ech_blocked`).
+    #[default]
+    Block,
+    /// Tunnel it (the CONNECT host and the outer SNI were checked).
+    Allow,
 }
 
 impl Default for TlsConfig {
@@ -489,6 +505,7 @@ impl Default for TlsConfig {
                 "update.microsoft.com".to_owned(),
             ],
             upstream_ca_bundle: PathBuf::new(),
+            ech_action: EchAction::Block,
         }
     }
 }
@@ -1189,6 +1206,17 @@ impl Config {
                 ),
             ));
         }
+        // Parsed but not implemented (review 3 L2): refuse anything but the default so that,
+        // e.g., `on_error = "block"` never gives a false sense of failing closed.
+        for (key, is_default) in [
+            ("on_error", self.on_error == OnError::Allow),
+            ("log_query_values", !self.log_query_values),
+            ("upstream_keepalive", !self.upstream_keepalive),
+        ] {
+            if !is_default {
+                return Err(invalid(key, "not implemented; only the default is supported"));
+            }
+        }
         self.validate_policies()?;
         if let Some(auth) = &self.proxy_auth {
             if auth.username.is_empty() || auth.username.contains(':') {
@@ -1552,7 +1580,7 @@ fn check_readable_file(key: &str, path: &Path) -> Result<(), ConfigError> {
 
 /// The CA directory may be absent (created in Phase 4); if present it must be a directory with
 /// no group/other permission bits (D-19). Owner check: DECISIONS_ADDENDUM A-06.
-fn check_private_dir(key: &str, path: &Path) -> Result<(), ConfigError> {
+pub(crate) fn check_private_dir(key: &str, path: &Path) -> Result<(), ConfigError> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

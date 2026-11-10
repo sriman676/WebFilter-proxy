@@ -616,3 +616,33 @@ fn l5_concurrent_settings_saves_are_serialized() {
     let text = std::fs::read_to_string(state.join("settings.json")).unwrap();
     assert!(serde_json::from_str::<Value>(&text).is_ok(), "never a torn write");
 }
+
+/// Review 3 L5: the log-dir probe uses a fresh random name with `create_new`, so a planted
+/// `.doctor-probe` symlink is never followed, and no probe file is left behind.
+#[test]
+fn rv3_l5_doctor_probe_ignores_planted_symlink_and_cleans_up() {
+    let lab = common::Lab::new();
+    let logs = lab.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let victim = lab.path().join("victim.txt");
+    std::fs::write(&victim, "precious").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&victim, logs.join(".doctor-probe")).unwrap();
+    let cfg = webfilter::config::Config::load(
+        &lab.write_config("listen = \"127.0.0.1:0\"\n[logging]\ndir = \"logs\"\n"),
+    )
+    .unwrap();
+    let results = webfilter::doctor::run(&cfg);
+    assert!(
+        results.iter().any(|(l, m)| *l == webfilter::doctor::Level::Pass && m.contains("log dir")),
+        "{results:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "symlink not followed");
+    let leftovers: Vec<String> = std::fs::read_dir(&logs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".doctor-probe-"))
+        .collect();
+    assert!(leftovers.is_empty(), "probe removed: {leftovers:?}");
+}
