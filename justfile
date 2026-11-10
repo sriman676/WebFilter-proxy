@@ -99,7 +99,7 @@ pentest-p6:
 pentest-p7:
     scripts/pentest_p7.sh
 pentest-p8:
-    @echo "TODO: pentest-p8 lands in Phase 8 (PENTEST_PLAN PT-8.x)" >&2; exit 1
+    scripts/pentest_p8.sh
 pentest-p9:
     scripts/pentest_p9.sh
 pentest-p10:
@@ -112,6 +112,9 @@ pentest-p13:
     scripts/pentest_p13.sh
 pentest-p14:
     scripts/pentest_p14.sh
+# Consolidated final pentest (A-29): all phase suites.
+pentest-all:
+    scripts/pentest_all.sh
 
 # --- end-to-end and external suites (later phases) --------------------------------------
 # Offline end-to-end suites that drive the real proxy/client (E-xx; E-28/E-41/E-44..50 have own recipes).
