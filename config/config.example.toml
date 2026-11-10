@@ -2,9 +2,9 @@
 mode = "enforce"                 # enforce | monitor
 listen = "127.0.0.1:8080"        # non-loopback requires [proxy_auth]
 worker_threads = 0               # 0 = number of CPUs
-on_error = "allow"               # allow | block  (filter internal error behaviour; always logged)
-log_query_values = false
-upstream_keepalive = false       # D-07: same client connection + same authority only
+on_error = "allow"               # not implemented: only "allow" is accepted (A-51)
+log_query_values = false         # not implemented: only false is accepted (D-18, A-51)
+upstream_keepalive = false       # not implemented: only false is accepted (D-07, A-51)
 block_non_tls_connect = true
 
 [limits]
@@ -61,6 +61,8 @@ intercept = false
 ca_dir = "~/.webfilter"
 passthrough_domains = ["*.bank.example", "update.microsoft.com"]
 upstream_ca_bundle = ""          # optional extra roots (PEM); verification is always on
+# ech_action = "block"           # block | allow: ECH ClientHellos on CONNECT passthrough; the outer
+                                 # SNI must match the CONNECT host either way (A-51)
 
 # Optional; REQUIRED when `listen` is not loopback
 # [proxy_auth]

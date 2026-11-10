@@ -4,13 +4,17 @@
 # FUZZ_SECS (default 60) per fuzz target; SOAK_SECS for the load soak; PENTEST=1 also runs pentest-p0..p13.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# Per-step logs go to a private, unpredictable directory (review 3 L6), kept for inspection.
+LOGDIR=$(mktemp -d "${TMPDIR:-/tmp}/wf-acceptance.XXXXXXXX") || { echo "mktemp failed"; exit 1; }
+echo "step logs: $LOGDIR"
 step() { # number name command...
   local n=$1 name=$2; shift 2
-  "$@" > "/tmp/wf-acceptance-$n.log" 2>&1; local rc=$?
+  local log="$LOGDIR/step-$n.log"
+  "$@" > "$log" 2>&1; local rc=$?
   case $rc in
     0) echo "PASS  $n $name" ;;
-    2) echo "SKIP  $n $name ($(tail -1 "/tmp/wf-acceptance-$n.log"))" ;;
-    *) echo "FAIL  $n $name (see /tmp/wf-acceptance-$n.log)"; exit 1 ;;
+    2) echo "SKIP  $n $name ($(tail -1 "$log"))" ;;
+    *) echo "FAIL  $n $name (see $log)"; exit 1 ;;
   esac
 }
 netns() { sudo -n true 2>/dev/null || { echo "needs sudo: sudo -E just e2e-netns"; return 2; }; sudo -E scripts/e2e_netns.sh; }
