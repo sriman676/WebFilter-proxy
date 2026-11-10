@@ -767,15 +767,18 @@ def cmd_samples(a: argparse.Namespace) -> None:
     steady = rows[a.skip:] if len(rows) > a.skip + 1 else rows
     rss_first, rss_last = steady[0][1], steady[-1][1]
     fd_spread = max(r[2] for r in steady) - min(r[2] for r in steady)
+    # A leak shows as growth: fds may fall (idle keep-alive connections reaped at the idle timeout)
+    # but must not climb above the first steady sample.
+    fd_growth = max(r[2] for r in steady) - steady[0][2]
     ok = peak <= a.max_mb * 1024
     if a.growth_mb is not None:
         ok = ok and peak - base <= a.growth_mb * 1024
     if a.stable:
-        ok = ok and rss_last <= rss_first * 1.2 + 10240 and fd_spread <= a.fd_tol
+        ok = ok and rss_last <= rss_first * 1.2 + 10240 and fd_growth <= a.fd_tol
     emit({"samples": len(rows), "base_rss_mb": round(base / 1024, 1), "peak_rss_mb": round(peak / 1024, 1),
           "steady_first_mb": round(rss_first / 1024, 1), "steady_last_mb": round(rss_last / 1024, 1),
           "fd_min": min(r[2] for r in steady), "fd_max": max(r[2] for r in steady), "fd_spread": fd_spread,
-          "ok": ok})
+          "fd_growth": fd_growth, "ok": ok})
     sys.exit(0 if ok else 1)
 
 
