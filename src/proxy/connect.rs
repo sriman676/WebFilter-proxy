@@ -135,16 +135,74 @@ where
     }
     let (mut upstream, ip) = connect_upstream(&ips, t.port, deps).await?;
     ev.dest_ip = Some(ip.to_string());
+    passthrough_tunnel(client, buf, &t, &mut upstream, ev, deps).await
+}
+
+/// The CONNECT answer.
+const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+/// Passthrough (SPEC 4.9): answer 200, peek the ClientHello (bounded, with the handshake
+/// timeout) and apply the SNI rule (D-22, review 2 M3), then relay with the peeked bytes sent
+/// upstream first. Non-TLS bytes are refused per `block_non_tls_connect` when interception is
+/// enabled (a passthrough domain); with interception off they are tunneled as before (4.9).
+async fn passthrough_tunnel<S, U>(
+    client: &mut S,
+    buf: &mut Vec<u8>,
+    t: &NormalizedTarget,
+    upstream: &mut U,
+    ev: &mut RequestEvent,
+    deps: &ProxyDeps,
+) -> Result<Outcome, Fail>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+    U: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let handshake = Duration::from_secs(deps.cfg.timeouts.tls_handshake);
+    write_all(client, ESTABLISHED, handshake).await.map_err(|_| client_gone())?;
     ev.status = 200;
-    open_tunnel(
-        client,
-        buf,
-        &mut upstream,
-        b"HTTP/1.1 200 Connection Established\r\n\r\n",
-        ev,
-        deps,
-    )
-    .await
+    match read_hello(client, buf, Instant::now() + handshake).await? {
+        Some(hello) => {
+            ev.tls_sni.clone_from(&hello.sni);
+            ev.ech_present = hello.ech_present;
+            check_sni(&hello, t, ev)?;
+        }
+        None if deps.cfg.block_non_tls_connect && deps.leaves.is_some() => {
+            return Err(non_tls(ev));
+        }
+        None => {}
+    }
+    open_tunnel(client, buf, upstream, b"", ev, deps).await
+}
+
+/// Non-TLS bytes on a CONNECT tunnel with `block_non_tls_connect`.
+fn non_tls(ev: &mut RequestEvent) -> Fail {
+    ev.action = Action::Block.as_str();
+    Fail { status: None, reason: Reason::NonTlsOnConnect, error: "non-TLS traffic on CONNECT" }
+}
+
+/// D-22: a present SNI must name the CONNECT host (case-insensitive, trailing dot ignored).
+/// With ECH the outer SNI is a cover name and is not compared.
+fn check_sni(
+    hello: &ClientHelloInfo,
+    t: &NormalizedTarget,
+    ev: &mut RequestEvent,
+) -> Result<(), Fail> {
+    let connect_host = t.host.to_string();
+    let connect_host =
+        connect_host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
+    if !hello.ech_present
+        && let Some(sni) = &hello.sni
+        && !sni.trim_end_matches('.').eq_ignore_ascii_case(connect_host)
+    {
+        ev.tls_sni.clone_from(&hello.sni);
+        ev.action = Action::Block.as_str();
+        return Err(Fail {
+            status: None,
+            reason: Reason::SniMismatch,
+            error: "SNI differs from the CONNECT host",
+        });
+    }
+    Ok(())
 }
 
 /// Send `answer` to the client, forward bytes the client already sent after its head (they
@@ -219,38 +277,18 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let handshake = Duration::from_secs(deps.cfg.timeouts.tls_handshake);
-    write_all(client, b"HTTP/1.1 200 Connection Established\r\n\r\n", handshake)
-        .await
-        .map_err(|_| client_gone())?;
+    write_all(client, ESTABLISHED, handshake).await.map_err(|_| client_gone())?;
     ev.status = 200;
     let Some(hello) = read_hello(client, buf, Instant::now() + handshake).await? else {
         if deps.cfg.block_non_tls_connect {
-            ev.action = Action::Block.as_str();
-            return Err(Fail {
-                status: None,
-                reason: Reason::NonTlsOnConnect,
-                error: "non-TLS traffic on CONNECT",
-            });
+            return Err(non_tls(ev));
         }
         // Not TLS and allowed: tunnel opaquely (SPEC 4.9).
         let (mut upstream, ip) = connect_upstream(&ips, t.port, deps).await?;
         ev.dest_ip = Some(ip.to_string());
         return open_tunnel(client, buf, &mut upstream, b"", ev, deps).await;
     };
-    let connect_host = t.host.to_string();
-    let connect_host = connect_host.trim_start_matches('[').trim_end_matches(']');
-    if !hello.ech_present
-        && let Some(sni) = &hello.sni
-        && sni.trim_end_matches('.') != connect_host
-    {
-        ev.tls_sni.clone_from(&hello.sni);
-        ev.action = Action::Block.as_str();
-        return Err(Fail {
-            status: None,
-            reason: Reason::SniMismatch,
-            error: "SNI differs from the CONNECT host",
-        });
-    }
+    check_sni(&hello, &t, ev)?;
     let tunnel = Tunnel {
         host: t.host,
         port: t.port,

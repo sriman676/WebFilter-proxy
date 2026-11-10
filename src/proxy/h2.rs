@@ -395,10 +395,11 @@ async fn exchange(
         .map_err(|_| upstream_err())?; // includes H10 violations detected by h2
 
     let (rparts, rbody) = resp.into_parts();
-    let content_type = rparts
-        .headers
-        .get(http::header::CONTENT_TYPE)
-        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+    // One unambiguous Content-Type or 502, as in HTTP/1 (D-08, review 2 M2).
+    let content_type = crate::util::content_type(
+        rparts.headers.get_all(http::header::CONTENT_TYPE).iter().map(|v| v.as_bytes()),
+    )
+    .map_err(|_| fail(502, Reason::UpstreamError, "ambiguous upstream Content-Type"))?;
     ev.http_content_type = content_type.as_deref().map(|c| crate::util::media_type(c).to_owned());
     let phase = Phase::ResponseHeaders { content_type: content_type.as_deref() };
     let d = deps.evaluate(&t, phase, profile, &c.tunnel.client_id);

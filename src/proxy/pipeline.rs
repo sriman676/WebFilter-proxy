@@ -670,13 +670,19 @@ where
         },
     };
     if resp.status == 101 {
+        // Only a websocket 101 opens the opaque relay (review 2 L1).
+        if !single(&resp.headers, "upgrade").is_some_and(|u| u.eq_ignore_ascii_case(b"websocket")) {
+            return Err(fail(502, Reason::UpstreamError, "invalid websocket handshake response"));
+        }
         return super::connect::relay_websocket(client, buf, upstream, up_buf, &resp, ev, deps)
             .await;
     }
     let resp_framing = response_framing(&resp, &head.method)
         .map_err(|_| fail(502, Reason::UpstreamError, "bad upstream framing"))?;
+    // One unambiguous Content-Type or 502, like duplicate Content-Length (D-08, review 2 M2).
     let content_type =
-        single(&resp.headers, "content-type").map(|v| String::from_utf8_lossy(v).into_owned());
+        crate::util::content_type(super::http1::values(&resp.headers, "content-type"))
+            .map_err(|_| fail(502, Reason::UpstreamError, "ambiguous upstream Content-Type"))?;
     ev.http_content_type = content_type.as_deref().map(|c| crate::util::media_type(c).to_owned());
     let d = deps.evaluate(
         t,
