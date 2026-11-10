@@ -2,6 +2,26 @@
 
 All notable changes per phase. Keep a Changelog format.
 
+## [v1.1.0] - 2026-11-10 - Release: final hardening, consolidated pentest, launch material
+### Security (all findings fixed with regression tests first; none Critical/High)
+- Three independent code reviews (REVIEW-1..3) and one whole-codebase automated pentest (`just pentest-full`):
+  scanning bypasses (Content-Disposition names, compressed executables, split h2 frames), limits on transparent
+  TLS, telemetry exposing query values, ambiguous Content-Type, passthrough SNI and fake-ECH bypasses, reload
+  dropping CLI overrides, abusable lockout tables, admin lockout from web pages, snapshot sanitizer edge cases
+  found by fuzzing (PF-F-01), plus 20 Low items. Report: `docs/pentest/final/FINAL_REPORT.md`.
+- New: `tls.ech_action`, read-only admin token, `Sec-Fetch-Site: cross-site` refused on admin, unimplemented
+  options rejected instead of ignored.
+### Performance and robustness
+- Speed pass with perf flamegraphs (`just profile`): no bottleneck; 17,764 req/s plain, 13,741 req/s intercepted.
+- Stress test (`just stress`, A-40): 42/42 checks.
+### Changed
+- Shared helpers (`src/util.rs`) replace duplicated lock, clock, media-type and name code; 7 unused dependencies
+  removed; duplicated test helpers moved to `tests/common`.
+- Version 1.1.0.
+### Added
+- `REPORT.md` (full project report), launch video and README header (`docs/media/`, sources in
+  `docs/media/source/`).
+
 ## [phase-14-complete] - 2026-11-10 - Phase 14: browser extension and WASM rule plugins (pentest in the final run, A-29)
 ### Added
 - `extension/`: Chrome/Firefox MV3 extension (badge, recent blocks, request access, proxy toggle) using the
