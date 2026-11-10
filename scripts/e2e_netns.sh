@@ -85,5 +85,7 @@ check "E-44 log fields (transparent, orig_dst, host_verified)" \
 check "E-48 orig_dst_failed event"         "grep -q orig_dst_failed $WORK/logs/webfilter_system.jsonl"
 [[ $E49 == 403 || $E49 == 508 ]] || { echo "  E-49 log:"; grep -h '10.200.0.1' "$WORK"/logs/*.jsonl | tail -3; tail -5 "$WORK/proxy.err"; }
 "$ROOT/scripts/netns_lab.sh" down >/dev/null
-check "PT-7.8 teardown restores the host exactly" '[[ "$(snapshot)" == "$BEFORE" ]]'
+AFTER=$(snapshot)
+check "PT-7.8 teardown restores the host exactly" '[[ "$AFTER" == "$BEFORE" ]]'
+[[ "$AFTER" == "$BEFORE" ]] || { echo "  PT-7.8 diff (< before, > after):"; diff <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") | sed 's/^/    /'; }
 [[ $fail -eq 0 ]] && echo "E2E-NETNS PASS" || { echo "E2E-NETNS FAIL"; exit 1; }

@@ -430,3 +430,19 @@ fn rv3_l1_failures_outside_the_window_decay() {
     assert!(l.record_failure(b, t0 + Duration::from_secs(59)), "5 within 60 s still lock");
     assert!(l.is_locked(b, t0 + Duration::from_secs(60)));
 }
+
+/// E-49 (netns run 2026-11-10): the proxy host's own non-loopback address is refused on every
+/// port, not only the listener's port (self-SSRF); loopback keeps the exact-port rule.
+#[test]
+fn e49_own_host_address_refused_on_every_port() {
+    let own: std::net::SocketAddr = "10.200.0.1:18880".parse().unwrap();
+    let lo: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let p = DestPolicy::new(false, vec![own, lo]);
+    for port in [80, 22, 443, 18880] {
+        assert_eq!(p.check_ip(ip("10.200.0.1"), port), Err(Reason::LoopDetected), "port {port}");
+    }
+    assert_eq!(p.check_ip(ip("::ffff:10.200.0.1"), 80), Err(Reason::LoopDetected), "IPv4-mapped");
+    assert_eq!(p.check_ip(ip("127.0.0.1"), 8080), Err(Reason::LoopDetected));
+    assert!(p.check_ip(ip("127.0.0.1"), 9000).is_ok(), "other loopback ports stay usable");
+    assert!(p.check_ip(ip("10.200.0.2"), 80).is_ok());
+}

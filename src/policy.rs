@@ -110,11 +110,16 @@ impl DestPolicy {
     /// Check one destination address.
     pub fn check_ip(&self, ip: IpAddr, port: u16) -> Result<(), Reason> {
         let ip = fold_ip(ip);
+        // A listener's own non-loopback address is the proxy host itself: refused on every port
+        // (self-SSRF, E-49). Loopback keeps the exact-port rule (lab origins live on loopback;
+        // in production loopback is denied as private anyway).
         let is_own = |a: &SocketAddr| {
             let own_ip = fold_ip(a.ip());
-            a.port() == port
-                && (own_ip == ip
-                    || (own_ip.is_unspecified() && (ip.is_loopback() || ip.is_unspecified())))
+            let host_itself = own_ip == ip && !own_ip.is_loopback() && !own_ip.is_unspecified();
+            host_itself
+                || (a.port() == port
+                    && (own_ip == ip
+                        || (own_ip.is_unspecified() && (ip.is_loopback() || ip.is_unspecified()))))
         };
         if self.own.iter().any(is_own) {
             return Err(Reason::LoopDetected);
