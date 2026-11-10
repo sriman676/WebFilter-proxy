@@ -419,17 +419,39 @@ async fn exchange(
             && parts.method == http::Method::GET
             && rparts.status.is_success()
     }) {
-        if !rbody.is_end_stream() {
-            first = rbody.data().await.transpose().map_err(|_| upstream_err())?;
+        // Accumulate DATA frames up to the magic prefix (a 1-byte first frame must not hide
+        // it, review M1); every byte read is kept and forwarded as one chunk.
+        let idle = Duration::from_secs(deps.cfg.timeouts.upstream_body_idle);
+        let mut acc = bytes::BytesMut::new();
+        while acc.len() < super::scanning::PREFIX && !rbody.is_end_stream() {
+            match timeout(idle, rbody.data()).await {
+                Err(_) => return Err(fail(504, Reason::Timeout, "upstream body idle")),
+                Ok(None) => break,
+                Ok(Some(r)) => acc.extend_from_slice(&r.map_err(|_| upstream_err())?),
+            }
         }
+        first = (!acc.is_empty()).then(|| acc.freeze());
         let prefix = first.as_deref().unwrap_or(&[]);
         let prefix = prefix.get(..prefix.len().min(super::scanning::PREFIX)).unwrap_or(&[]);
-        if scanner.eligible(&t.path, content_type.as_deref(), prefix) {
-            let cd = rparts
-                .headers
-                .get("content-disposition")
-                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
-            ev.download_name = Some(crate::scan::download_name(cd.as_deref(), &t.path));
+        let dispositions: Vec<String> = rparts
+            .headers
+            .get_all(http::header::CONTENT_DISPOSITION)
+            .iter()
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+            .collect();
+        let encoded = crate::scan::content_encoded(
+            rparts.headers.get_all(http::header::CONTENT_ENCODING).iter().map(|v| v.as_bytes()),
+        );
+        let download = crate::scan::Download {
+            path: &t.path,
+            content_type: content_type.as_deref(),
+            dispositions: &dispositions,
+            encoded,
+            prefix,
+        };
+        if scanner.eligible(&download) {
+            let cd = dispositions.first().map(String::as_str);
+            ev.download_name = Some(crate::scan::download_name(cd, &t.path));
             return scan_stream(respond, ev, c, profile, scanner, &rparts, first, rbody).await;
         }
     }
@@ -473,14 +495,10 @@ async fn scan_stream(
         .headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok()?.parse().ok());
-    let encoding =
-        rparts.headers.get(http::header::CONTENT_ENCODING).map(|v| v.as_bytes().to_vec());
-    let early = known_unscannable(
-        rparts.status.as_u16(),
-        encoding.as_deref(),
-        length,
-        scanner.cfg.max_bytes,
+    let encoded = crate::scan::content_encoded(
+        rparts.headers.get_all(http::header::CONTENT_ENCODING).iter().map(|v| v.as_bytes()),
     );
+    let early = known_unscannable(rparts.status.as_u16(), encoded, length, scanner.cfg.max_bytes);
     let mut slot = match early {
         Some(why) => Err(Verdict::Unscannable(why)),
         None => scanner.begin().await.map_err(Verdict::Unscannable),

@@ -22,7 +22,9 @@ use webfilter::config::{FeedConfig, FeedFormat};
 use webfilter::feeds::{
     Entry, FeedError, FeedManager, FeedUpdate, Fetcher, Store, parse_feed, sanity, url_digest,
 };
-use webfilter::scan::{download_name, magic, parse_clamd_reply, sanitize_signature};
+use webfilter::scan::{
+    Download, Scanner, content_encoded, download_name, magic, parse_clamd_reply, sanitize_signature,
+};
 
 const W: Duration = Duration::from_secs(10);
 
@@ -373,6 +375,11 @@ fn clean_bytes() -> Vec<u8> {
     v
 }
 
+/// Opaque (brotli-looking) bytes: no magic, so only the encoding can make them eligible.
+fn br_bytes() -> Vec<u8> {
+    b"\x8b\x02\x80hello brotli\x03".to_vec()
+}
+
 async fn download_origin() -> Origin {
     Origin::start(|req| {
         let text = String::from_utf8_lossy(req).into_owned();
@@ -384,6 +391,12 @@ async fn download_origin() -> Origin {
             "page.html" => ("text/html", b"<html>hi</html>".to_vec(), ""),
             "partial.exe" => ("application/octet-stream", clean_bytes(), "status206"),
             "gz.exe" => ("application/octet-stream", clean_bytes(), "content-encoding: gzip\r\n"),
+            // Review M1: eligibility from Content-Disposition, Content-Encoding and `name.exe.`.
+            "attach" => {
+                ("text/plain", eicar(), "content-disposition: attachment; filename=\"x.ps1\"\r\n")
+            }
+            "br.bin" => ("text/plain", br_bytes(), "content-encoding: br\r\n"),
+            "eicar.exe." => ("text/plain", eicar(), ""),
             _ => ("text/plain", Vec::new(), ""),
         };
         let line =
@@ -512,6 +525,151 @@ async fn e65_unscannable_matrix_follows_the_actions() {
     assert!(r.contains("x-webfilter-reason: scanner_unavailable"), "{r}");
     h.stop().await;
     assert_eq!(h.log_lines()[0]["scan_status"], "error");
+}
+
+#[test]
+fn review_m1_eligibility_units() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg =
+        webfilter::config::ScanConfig { temp_dir: dir.path().join("t"), ..Default::default() };
+    let s = Scanner::new(cfg).unwrap();
+    let base = Download { path: "/x", content_type: Some("text/plain"), ..Default::default() };
+    assert!(!s.eligible(&base));
+    for cd in [
+        "attachment; filename=\"x.ps1\"",
+        "attachment; filename=X.BAT",
+        "attachment; filename=\"a;b.exe. \"",
+        "attachment; filename=\"a.txt\"; filename*=UTF-8''evil%2Ejs",
+    ] {
+        let cds = [cd.to_owned()];
+        assert!(s.eligible(&Download { dispositions: &cds, ..base }), "{cd}");
+    }
+    let cds = ["inline; filename=\"notes.txt\"".to_owned()];
+    assert!(!s.eligible(&Download { dispositions: &cds, ..base }));
+    assert!(s.eligible(&Download { encoded: true, ..base }), "encoded non-page body");
+    for page in ["text/html; charset=utf-8", "text/css", "application/json"] {
+        let d = Download { content_type: Some(page), encoded: true, ..base };
+        assert!(!s.eligible(&d), "compressed {page} is browsing, not a download");
+    }
+    assert!(s.eligible(&Download { path: "/a.exe.", ..base }), "trailing dot");
+    assert!(s.eligible(&Download { path: "/a.EXE..", ..base }));
+    assert!(s.eligible(&Download { prefix: b"MZ", ..base }));
+    assert!(content_encoded([&b"identity, br"[..]]) && content_encoded([&b"gzip"[..]]));
+    assert!(content_encoded([&b"identity"[..], &b"deflate"[..]]), "duplicate headers");
+    assert!(!content_encoded([&b" Identity "[..]]) && !content_encoded(std::iter::empty()));
+}
+
+#[tokio::test]
+async fn review_m1_disposition_encoding_and_trailing_dot_cannot_skip_scanning() {
+    let clamd = fake_clamd().await;
+    let origin = download_origin().await;
+    let port = origin.addr.port();
+    let mut h = scan_proxy("block", "", clamd).await;
+    let r = get(&h, port, "attach").await;
+    assert_eq!(status(&r), 403, "text/plain + Content-Disposition .ps1: {r}");
+    assert!(r.contains("x-webfilter-reason: malware_detected"));
+    let r = get(&h, port, "br.bin").await;
+    assert_eq!(status(&r), 403, "content-encoded body is unscannable: {r}");
+    assert!(r.contains("x-webfilter-reason: unscannable"));
+    let r = get(&h, port, "eicar.exe.").await;
+    assert_eq!(status(&r), 403, "trailing dot: {r}");
+    assert!(r.contains("x-webfilter-reason: malware_detected"));
+    h.stop().await;
+    let lines = h.log_lines();
+    assert_eq!(lines[0]["scan_status"], "infected");
+    assert_eq!(lines[0]["download_name"], "x.ps1");
+    assert_eq!(lines[1]["scan_status"], "unscannable");
+    assert_eq!(lines[2]["scan_status"], "infected");
+    // The unscannable action decides: allow streams the encoded body unchanged.
+    let mut h = scan_proxy("block", "unscannable_action = \"allow\"", clamd).await;
+    let r = get(&h, port, "br.bin").await;
+    assert_eq!(status(&r), 200, "{r}");
+    // `raw` returns lossy UTF-8; compare the same view of the expected bytes.
+    assert_eq!(body_of(&r), String::from_utf8_lossy(&br_bytes()).as_bytes());
+    h.stop().await;
+    assert_eq!(h.log_lines()[0]["scan_status"], "unscannable");
+}
+
+/// An origin that sends `head`, then `parts` with `pause` between them, and keeps the
+/// connection open afterwards (so only correct framing ends the response).
+async fn slow_origin(head: String, parts: Vec<Vec<u8>>, pause: Duration) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let (head, parts) = (head.clone(), parts.clone());
+            tokio::spawn(async move {
+                let mut req = Vec::new();
+                let mut b = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut b).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => req.extend_from_slice(&b[..n]),
+                    }
+                }
+                if s.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                for (i, p) in parts.iter().enumerate() {
+                    if i > 0 {
+                        tokio::time::sleep(pause).await;
+                    }
+                    if s.write_all(p).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = s.read(&mut b).await; // hold the connection open until the proxy closes it
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn review_l2_unscannable_allowed_bodies_arrive_complete() {
+    let clamd = fake_clamd().await;
+    let body = clean_bytes();
+    let pause = Duration::from_millis(2500);
+    let cl_head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\r\n",
+        body.len()
+    );
+    let cl =
+        slow_origin(cl_head, vec![body[..20_000].to_vec(), body[20_000..].to_vec()], pause).await;
+    let mut wire = Vec::new();
+    for c in body.chunks(4000) {
+        wire.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+        wire.extend_from_slice(c);
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"0\r\n\r\n");
+    let mid = 10_001; // inside a chunk
+    let te_head = "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+    let chunked =
+        slow_origin(te_head.into(), vec![wire[..mid].to_vec(), wire[mid..].to_vec()], pause).await;
+    // The scan buffer times out mid-body; the unscannable download is allowed.
+    let mut h =
+        scan_proxy("block", "buffer_timeout_secs = 1\nunscannable_action = \"allow\"", clamd).await;
+    for (port, what) in [(cl, "content-length"), (chunked, "chunked")] {
+        let started = std::time::Instant::now();
+        let mut s = tokio::net::TcpStream::connect(h.addr).await.unwrap();
+        let req = format!(
+            "GET http://dl.test:{port}/slow.exe HTTP/1.1\r\nHost: dl.test:{port}\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        let _ = tokio::time::timeout(W, s.read_to_end(&mut out)).await;
+        assert!(started.elapsed() < Duration::from_secs(8), "{what}: waited for a timeout");
+        assert!(out.starts_with(b"HTTP/1.1 200"), "{what}: {}", String::from_utf8_lossy(&out));
+        let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        assert!(out[split..] == body[..], "{what}: body differs ({} bytes)", out.len() - split);
+    }
+    h.stop().await;
+    let lines = h.log_lines();
+    assert_eq!(lines.len(), 2);
+    for v in lines {
+        assert_eq!(v["scan_status"], "unscannable");
+    }
 }
 
 #[tokio::test]

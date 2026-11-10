@@ -706,10 +706,22 @@ where
             idle,
         )
         .await;
-        if scanner.eligible(&t.path, content_type.as_deref(), &prefix) {
-            let cd = single(&resp.headers, "content-disposition")
-                .map(|v| String::from_utf8_lossy(v).into_owned());
-            ev.download_name = Some(crate::scan::download_name(cd.as_deref(), &t.path));
+        let dispositions: Vec<String> = super::http1::values(&resp.headers, "content-disposition")
+            .map(|v| String::from_utf8_lossy(v).into_owned())
+            .collect();
+        let download = crate::scan::Download {
+            path: &t.path,
+            content_type: content_type.as_deref(),
+            dispositions: &dispositions,
+            encoded: crate::scan::content_encoded(super::http1::values(
+                &resp.headers,
+                "content-encoding",
+            )),
+            prefix: &prefix,
+        };
+        if scanner.eligible(&download) {
+            let cd = dispositions.first().map(String::as_str);
+            ev.download_name = Some(crate::scan::download_name(cd, &t.path));
             return super::scanning::forward(
                 client,
                 ev,
