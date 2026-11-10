@@ -23,6 +23,7 @@ use super::pipeline::{
 };
 use crate::config::{HostVerify, OrigDstMethod, TransparentAction};
 use crate::filter::{Action, Phase};
+use crate::limiter::Shaped;
 use crate::logger::{RequestEvent, SysEvent};
 use crate::normalize::{NormalizedTarget, TargetContext, canonicalize, fold_ip};
 use crate::policy::{PortKind, check_port};
@@ -236,18 +237,16 @@ pub(crate) async fn verify_host(
 }
 
 /// Transparent TLS: one connection-level event, like a CONNECT tunnel.
-async fn serve_tls(
-    mut client: TcpStream,
-    peer: SocketAddr,
-    orig: SocketAddr,
-    deps: &Arc<ProxyDeps>,
-) {
+async fn serve_tls(client: TcpStream, peer: SocketAddr, orig: SocketAddr, deps: &Arc<ProxyDeps>) {
     let started = Instant::now();
     let mut ev = deps.new_event(peer);
     note_transparent(&mut ev, orig);
     ev.http_method = "CONNECT".into();
     ev.url_scheme = "https".into();
     ev.dest_port = orig.port();
+    // Shaped like an explicit CONNECT connection: the client's buckets are set once its
+    // identity is known (D-51); intercepted inner requests then inherit the pacing.
+    let mut client = Shaped::new(client);
     let mut buf = Vec::new();
     if let Err(f) = tls_flow(&mut client, &mut buf, orig, &mut ev, deps, peer).await {
         note_fail(&mut ev, &Fail { status: None, ..f });
@@ -257,7 +256,7 @@ async fn serve_tls(
 }
 
 async fn tls_flow(
-    client: &mut TcpStream,
+    client: &mut Shaped<TcpStream>,
     buf: &mut Vec<u8>,
     orig: SocketAddr,
     ev: &mut RequestEvent,
@@ -267,6 +266,12 @@ async fn tls_flow(
     let cfg = &deps.cfg.transparent;
     let refuse = |reason: Reason, error: &'static str| Fail { status: None, reason, error };
     let (client_id, profile) = deps.identify(peer.ip(), None, ev);
+    // Request rate, in-flight cap and daily quota, as for an explicit CONNECT (D-51). Nothing
+    // can be answered before the handshake: the connection is closed and the event logged.
+    let _inflight =
+        deps.admit(&client_id, &profile).map_err(|r| refuse(r.reason, "limit exceeded"))?;
+    let shaping = profile.rate.map(|r| deps.limiter.buckets(&client_id, &r)).unwrap_or_default();
+    client.set(shaping);
     let _tunnel = match profile.rate.map(|r| deps.limiter.acquire_tunnel(&client_id, &r)) {
         Some(Err(r)) => {
             deps.stats.record_limit(&profile.name, r.reason);
@@ -359,7 +364,7 @@ async fn tls_flow(
 
 /// Relay to the original destination, replaying the captured ClientHello first.
 async fn passthrough(
-    client: &mut TcpStream,
+    client: &mut Shaped<TcpStream>,
     buf: &mut Vec<u8>,
     orig: SocketAddr,
     ev: &mut RequestEvent,

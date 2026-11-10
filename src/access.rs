@@ -27,6 +27,47 @@ pub const RECENT_CLIENTS: usize = 100_000;
 pub const MAX_JUSTIFICATION: usize = 500;
 /// Longest contact field.
 pub const MAX_CONTACT: usize = 100;
+/// Stored access requests (all statuses); the oldest decided ones go first.
+pub const MAX_REQUESTS: usize = 10_000;
+/// Decided requests are kept this long (seconds).
+pub const DECIDED_RETENTION: u64 = 7 * 86_400;
+/// Temp allows kept at most.
+pub const MAX_ALLOWS: usize = 10_000;
+/// Per-client hourly windows tracked before expired ones are swept on submit.
+const HOURLY_CLIENTS: usize = 10_000;
+const HOUR: Duration = Duration::from_secs(3600);
+
+/// Apply retention to `all`: drop decided requests older than [`DECIDED_RETENTION`], then the
+/// oldest decided ones while more than `cap` remain. Pending requests are never dropped (the
+/// per-client pending cap bounds them; a full store refuses new submissions). True if changed.
+pub fn retain_requests(all: &mut Vec<AccessRequest>, now: u64, cap: usize) -> bool {
+    let before = all.len();
+    all.retain(|r| r.status == "pending" || r.created.saturating_add(DECIDED_RETENTION) > now);
+    let mut excess = all.len().saturating_sub(cap);
+    if excess > 0 {
+        let mut decided: Vec<(u64, usize)> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.status != "pending")
+            .map(|(i, r)| (r.created, i))
+            .collect();
+        decided.sort_unstable();
+        let mut doomed = vec![false; all.len()];
+        for (_, i) in decided {
+            if excess == 0 {
+                break;
+            }
+            if let Some(d) = doomed.get_mut(i) {
+                *d = true;
+                excess -= 1;
+            }
+        }
+        // `retain` visits elements in order.
+        let mut flags = doomed.into_iter();
+        all.retain(|_| !flags.next().unwrap_or(false));
+    }
+    all.len() != before
+}
 
 /// Reasons a user may ask to review (everything else shows "cannot be reviewed").
 pub fn eligible(reason: Reason) -> bool {
@@ -228,6 +269,28 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Forget clients whose hourly window holds no submission from the last hour.
+fn prune_hourly(hourly: &mut HashMap<String, VecDeque<Instant>>) {
+    hourly.retain(|_, q| {
+        q.retain(|t| t.elapsed() < HOUR);
+        !q.is_empty()
+    });
+}
+
+/// Append one line to a 0600 file (created if missing).
+fn append_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(data)?;
+    f.sync_data()
+}
+
 fn random_id() -> String {
     let mut b = [0u8; 8];
     let _ = getrandom::fill(&mut b);
@@ -263,11 +326,13 @@ impl AccessState {
                 }
             },
         };
-        let requests = std::fs::read_to_string(dir.join("access_requests.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<AccessRequest>(l).ok())
-            .collect();
+        let mut requests: Vec<AccessRequest> =
+            std::fs::read_to_string(dir.join("access_requests.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<AccessRequest>(l).ok())
+                .collect();
+        let pruned = retain_requests(&mut requests, now, MAX_REQUESTS);
         let me = Self {
             dir: dir.to_path_buf(),
             csrf: Csrf::new(),
@@ -276,6 +341,10 @@ impl AccessState {
             allows: Mutex::new(allows),
             hourly: Mutex::new(HashMap::new()),
         };
+        if pruned {
+            let all = me.requests.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = me.persist_requests(&all);
+        }
         (me, warning)
     }
 
@@ -313,25 +382,35 @@ impl AccessState {
         {
             return Err(Refused { status: 400, message: "text too long" });
         }
-        {
-            let mut hourly = self.hourly.lock().unwrap_or_else(|e| e.into_inner());
-            let q = hourly.entry(client.to_owned()).or_default();
-            q.retain(|t| t.elapsed() < Duration::from_secs(3600));
-            if q.len() >= per_hour as usize {
-                return Err(Refused { status: 429, message: "too many requests this hour" });
+        let busy = |m| Refused { status: 429, message: m };
+        // Lock order everywhere: hourly, then requests, then allows.
+        let mut hourly = self.hourly.lock().unwrap_or_else(|e| e.into_inner());
+        if hourly.len() >= HOURLY_CLIENTS && !hourly.contains_key(client) {
+            prune_hourly(&mut hourly);
+            if hourly.len() >= HOURLY_CLIENTS {
+                return Err(busy("too many requests this hour"));
             }
-            let pending = self
-                .requests
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .filter(|r| r.client_id == client && r.status == "pending")
-                .count();
-            if pending >= max_pending as usize {
-                return Err(Refused { status: 429, message: "too many pending requests" });
-            }
-            q.push_back(Instant::now());
         }
+        let q = hourly.entry(client.to_owned()).or_default();
+        q.retain(|t| t.elapsed() < HOUR);
+        if q.len() >= per_hour as usize {
+            return Err(busy("too many requests this hour"));
+        }
+        let mut all = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = all.iter().filter(|r| r.client_id == client && r.status == "pending").count();
+        if pending >= max_pending as usize {
+            return Err(busy("too many pending requests"));
+        }
+        // Make room for one more (oldest decided first); a store full of pending refuses.
+        let pruned = retain_requests(&mut all, unix_now(), MAX_REQUESTS.saturating_sub(1));
+        if all.len() >= MAX_REQUESTS {
+            if pruned {
+                let _ = self.persist_requests(&all);
+            }
+            return Err(busy("too many pending requests"));
+        }
+        q.push_back(Instant::now());
+        drop(hourly);
         let req = AccessRequest {
             id: random_id(),
             event_id: event_id.to_owned(),
@@ -345,9 +424,16 @@ impl AccessState {
             created: unix_now(),
             decided_by: None,
         };
-        let mut all = self.requests.lock().unwrap_or_else(|e| e.into_inner());
         all.push(req.clone());
-        let _ = self.persist_requests(&all);
+        // Append the new record unless retention changed the file's contents.
+        let path = self.dir.join("access_requests.jsonl");
+        let appended = !pruned
+            && serde_json::to_string(&req)
+                .ok()
+                .is_some_and(|l| append_private(&path, format!("{l}\n").as_bytes()).is_ok());
+        if !appended {
+            let _ = self.persist_requests(&all);
+        }
         Ok(req)
     }
 
@@ -376,26 +462,37 @@ impl AccessState {
         ttl: u64,
         profile_scope: bool,
     ) -> Result<(AccessRequest, Option<TempAllow>), &'static str> {
+        // Both records change under the requests lock: an approval whose temp allow cannot be
+        // created (invalid host, cap, I/O) leaves the request pending (review L3).
         let mut all = self.requests.lock().unwrap_or_else(|e| e.into_inner());
         let r = all.iter_mut().find(|r| r.id == id).ok_or("unknown request")?;
         if r.status != "pending" {
             return Err("request already decided");
         }
-        r.status = if approve { "approved" } else { "denied" }.into();
-        r.decided_by = Some(actor.to_owned());
-        let decided = r.clone();
-        let _ = self.persist_requests(&all);
-        drop(all);
         let allow = if approve {
             let scope = if profile_scope {
-                Scope::Profile(decided.profile.clone())
+                Scope::Profile(r.profile.clone())
             } else {
-                Scope::Client(decided.client_id.clone())
+                Scope::Client(r.client_id.clone())
             };
-            Some(self.add_allow(&decided.host, false, scope, ttl, actor)?)
+            Some(self.add_allow(&r.host, false, scope, ttl, actor)?)
         } else {
             None
         };
+        r.status = if approve { "approved" } else { "denied" }.into();
+        r.decided_by = Some(actor.to_owned());
+        let decided = r.clone();
+        if self.persist_requests(&all).is_err() {
+            // Roll back so memory and disk agree: still pending, no allow.
+            if let Some(r) = all.iter_mut().find(|r| r.id == id) {
+                r.status = "pending".into();
+                r.decided_by = None;
+            }
+            if let Some(a) = &allow {
+                self.remove_allow(&a.id);
+            }
+            return Err("cannot persist access requests");
+        }
         Ok((decided, allow))
     }
 
@@ -418,11 +515,14 @@ impl AccessState {
             created_by: actor.to_owned(),
         };
         let mut all = self.allows.lock().unwrap_or_else(|e| e.into_inner());
-        if all.len() >= 10_000 {
+        if all.len() >= MAX_ALLOWS {
             return Err("too many temp allows");
         }
         all.push(allow.clone());
-        self.persist_allows(&all).map_err(|_| "cannot persist temp allows")?;
+        if self.persist_allows(&all).is_err() {
+            all.pop(); // memory matches disk
+            return Err("cannot persist temp allows");
+        }
         Ok(allow)
     }
 
@@ -450,9 +550,17 @@ impl AccessState {
             .collect()
     }
 
-    /// Drop expired allows; returns them (for `temp_allow_expired` events).
+    /// Drop expired allows; returns them (for `temp_allow_expired` events). Also applies request
+    /// retention and forgets expired per-client hourly windows.
     pub fn sweep(&self) -> Vec<TempAllow> {
         let now = unix_now();
+        prune_hourly(&mut self.hourly.lock().unwrap_or_else(|e| e.into_inner()));
+        {
+            let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+            if retain_requests(&mut requests, now, MAX_REQUESTS) {
+                let _ = self.persist_requests(&requests);
+            }
+        }
         let mut all = self.allows.lock().unwrap_or_else(|e| e.into_inner());
         let (gone, keep): (Vec<_>, Vec<_>) = all.drain(..).partition(|a| a.expires <= now);
         *all = keep;
@@ -482,5 +590,130 @@ impl AccessState {
         let all = self.requests.lock().unwrap_or_else(|e| e.into_inner());
         let n = |s: &str| all.iter().filter(|r| r.status == s).count();
         [("pending", n("pending")), ("approved", n("approved")), ("denied", n("denied"))]
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    fn submit(s: &AccessState, client: &str, event: &str, host: &str) -> AccessRequest {
+        s.recent.add(client, event, Reason::DomainBlocklist, host, "default");
+        let token = s.csrf.token(event, client);
+        s.submit(client, event, &token, "need it", "", 100, 100).unwrap()
+    }
+
+    fn record(id: &str, status: &str, created: u64) -> AccessRequest {
+        AccessRequest {
+            id: id.into(),
+            event_id: format!("ev-{id}"),
+            client_id: "ip:10.0.0.1".into(),
+            profile: "default".into(),
+            host: "x.test".into(),
+            reason: "domain_blocklist".into(),
+            justification: String::new(),
+            contact: String::new(),
+            status: status.into(),
+            created,
+            decided_by: None,
+        }
+    }
+
+    #[test]
+    fn l3_approval_without_a_valid_allow_stays_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _) = AccessState::load(dir.path(), 86_400);
+        let r = submit(&s, "ip:10.0.0.1", "ev1", "::1"); // IPv6 literal: no domain allow
+        assert!(s.decide(&r.id, true, "admin", 3600, false).is_err());
+        assert_eq!(s.request(&r.id).unwrap().status, "pending", "nothing committed");
+        assert!(s.allows().is_empty());
+        let on_disk = std::fs::read_to_string(dir.path().join("access_requests.jsonl")).unwrap();
+        assert!(on_disk.contains("\"pending\"") && !on_disk.contains("\"approved\""));
+        // A valid approval commits both records.
+        let ok = submit(&s, "ip:10.0.0.1", "ev2", "ok.test");
+        let (d, allow) = s.decide(&ok.id, true, "admin", 3600, false).unwrap();
+        assert_eq!(d.status, "approved");
+        assert_eq!(allow.unwrap().host, "ok.test");
+        // The failed one can still be denied.
+        assert_eq!(s.decide(&r.id, false, "admin", 3600, false).unwrap().0.status, "denied");
+    }
+
+    #[test]
+    fn l4_retention_drops_old_decided_and_caps_oldest_decided_first() {
+        let now = 100 * 86_400;
+        let old = now - DECIDED_RETENTION - 1;
+        let mut all = vec![
+            record("a", "approved", old),
+            record("b", "pending", old),
+            record("c", "denied", now - 10),
+            record("d", "denied", now - 20),
+            record("e", "pending", now),
+        ];
+        assert!(retain_requests(&mut all, now, 10));
+        let ids: Vec<&str> = all.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c", "d", "e"], "old decided gone, old pending kept");
+        assert!(retain_requests(&mut all, now, 3));
+        let ids: Vec<&str> = all.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c", "e"], "the oldest decided goes first, order kept");
+        assert!(retain_requests(&mut all, now, 1));
+        assert!(all.iter().all(|r| r.status == "pending"), "pending never dropped");
+        assert!(!retain_requests(&mut all, now, 1));
+    }
+
+    #[test]
+    fn l4_load_prunes_and_submit_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access_requests.jsonl");
+        let now = unix_now();
+        let lines: String = [
+            record("old", "approved", now - DECIDED_RETENTION - 5),
+            record("new", "denied", now - 5),
+        ]
+        .iter()
+        .map(|r| serde_json::to_string(r).unwrap() + "\n")
+        .collect();
+        std::fs::write(&path, lines).unwrap();
+        let (s, _) = AccessState::load(dir.path(), 86_400);
+        assert!(s.request("old").is_none() && s.request("new").is_some());
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before.lines().count(), 1, "pruned on load and persisted");
+        let r = submit(&s, "ip:10.0.0.2", "ev3", "a.test");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(&before), "appended, earlier lines untouched");
+        assert_eq!(after.lines().count(), 2);
+        assert!(after.contains(&r.id));
+        // Sweep keeps live hourly windows: the per-hour cap still applies afterwards.
+        s.sweep();
+        s.recent.add("ip:10.0.0.2", "ev4", Reason::DomainBlocklist, "b.test", "default");
+        let token = s.csrf.token("ev4", "ip:10.0.0.2");
+        let e = s.submit("ip:10.0.0.2", "ev4", &token, "", "", 1, 100).unwrap_err();
+        assert_eq!(e.status, 429);
+    }
+
+    #[test]
+    fn l4_global_store_cap_refuses_when_full_of_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access_requests.jsonl");
+        let now = unix_now();
+        let lines: String = (0..MAX_REQUESTS)
+            .map(|i| {
+                let mut r = record(&format!("p{i}"), "pending", now);
+                r.client_id = format!("ip:10.{}.{}.1", i / 256, i % 256);
+                serde_json::to_string(&r).unwrap() + "\n"
+            })
+            .collect();
+        std::fs::write(&path, lines).unwrap();
+        let (s, _) = AccessState::load(dir.path(), 86_400);
+        s.recent.add("ip:10.200.0.9", "evx", Reason::DomainBlocklist, "c.test", "default");
+        let token = s.csrf.token("evx", "ip:10.200.0.9");
+        let e = s.submit("ip:10.200.0.9", "evx", &token, "", "", 5, 5).unwrap_err();
+        assert_eq!(e.status, 429, "store full of pending requests");
+        // Once some are decided, the oldest decided one makes room.
+        let first = s.requests(Some("pending")).first().unwrap().id.clone();
+        s.decide(&first, false, "admin", 60, false).unwrap();
+        s.submit("ip:10.200.0.9", "evx", &token, "", "", 5, 5).unwrap();
+        assert_eq!(s.requests(None).len(), MAX_REQUESTS);
+        assert!(s.request(&first).is_none(), "oldest decided dropped");
     }
 }
