@@ -151,6 +151,14 @@ fn robots_from(outcome: Result<Outcome, ClientError>) -> Robots {
     }
 }
 
+/// The path (plus query) that robots.txt rules match against.
+fn robots_path(url: &Url) -> String {
+    match url.query() {
+        Some(q) => format!("{}?{q}", url.path()),
+        None => url.path().to_owned(),
+    }
+}
+
 fn save(dir: &Path, name: &str, body: &[u8], max: u64) -> Result<PathBuf, ClientError> {
     write_unique(dir, name, body, max).map_err(|e| ClientError::Io(e.to_string()))
 }
@@ -206,17 +214,33 @@ pub async fn crawl(
             robots.insert(origin.clone(), robots_from(r));
         }
         let rules = robots.get(&origin);
-        let path = match url.query() {
-            Some(q) => format!("{}?{q}", url.path()),
-            None => url.path().to_owned(),
-        };
-        if rules.is_some_and(|r| !r.allowed(&agent, &path)) {
+        if rules.is_some_and(|r| !r.allowed(&agent, &robots_path(&url))) {
             report.skipped.push((url.to_string(), "robots.txt".into()));
             continue;
         }
         polite.wait(&url, rules, &agent).await;
         let t0 = Instant::now();
-        let (outcome, attempts) = client.get_within(&url, &[], &scope).await;
+        // A redirect must stay in scope and must not land on a path robots.txt disallows for an
+        // origin whose rules are already known (review L6).
+        let robots_refused: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let page_scope = |u: &Url| {
+            if !scope(u) {
+                return false;
+            }
+            let disallowed = robots
+                .get(&u.origin().ascii_serialization())
+                .is_some_and(|r| !r.allowed(&agent, &robots_path(u)));
+            if disallowed {
+                *robots_refused.lock().unwrap_or_else(|e| e.into_inner()) = Some(u.to_string());
+            }
+            !disallowed
+        };
+        let (outcome, attempts) = client.get_within(&url, &[], &page_scope).await;
+        let refused = robots_refused.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let (Err(_), Some(target)) = (&outcome, refused) {
+            report.skipped.push((target, "robots.txt".into()));
+            continue;
+        }
         let mut result = FetchResult {
             url: url.to_string(),
             final_url: url.to_string(),
@@ -286,7 +310,8 @@ pub async fn crawl(
     for (path, base) in &saved_pages {
         if let Ok(text) = std::fs::read(path) {
             let html = rewrite_links(&String::from_utf8_lossy(&text), base, &saved_names);
-            std::fs::write(path, html).map_err(|e| ClientError::Io(e.to_string()))?;
+            crate::client::replace_file(path, html.as_bytes())
+                .map_err(|e| ClientError::Io(e.to_string()))?;
         }
     }
     for r in &mut report.pages {
