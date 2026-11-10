@@ -29,7 +29,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
 
-use crate::auth::{Lockout, verify_password};
+use crate::auth::{Lockout, MAX_USER_LEN, user_key, verify_password};
 use crate::blocklist::BlocklistHandle;
 use crate::config::{Config, Mode};
 use crate::filter::{Action, Decision, Phase, evaluate_profile};
@@ -60,7 +60,8 @@ const DUMMY_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$/LgZaRwAUqKQTcyrNq4vMQ$9
 /// Proxy authentication (D-14, D-50, SPEC 4.10): users come from the current [`PolicySet`].
 struct ProxyAuth {
     ip_lockout: Lockout<IpAddr>,
-    user_lockout: Lockout<String>,
+    /// Keyed by (known user or one shared unknown name, client /64) (RV3-M3).
+    user_lockout: Lockout<(String, IpAddr)>,
     cache: Mutex<HashMap<[u8; 32], Instant>>,
     permits: Semaphore,
     /// Verified for unknown users so they cost the same as a wrong password (PT-9.7).
@@ -97,14 +98,20 @@ impl ProxyAuth {
             .strip_prefix(b"Basic ")
             .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
             .and_then(|raw| String::from_utf8(raw).ok());
+        // Only failures that cost an argon2 verification are counted, so cheap malformed
+        // requests cannot fill the lockout tables (RV3-M4).
         let Some((user, password)) = creds.as_deref().and_then(|c| c.split_once(':')) else {
-            self.failure(ip, "", sys);
             return Err(fail(407, Reason::AuthFailed, "malformed proxy credentials"));
         };
-        if self.user_lockout.is_locked(user.to_owned(), std::time::Instant::now()) {
+        let known = users.user(user);
+        if known.is_none() && user.len() > MAX_USER_LEN {
+            // Longer than any configured name: rejected before any counting (RV3-M3).
+            return Err(fail(407, Reason::AuthFailed, "invalid proxy credentials"));
+        }
+        let ukey = || user_key(user, known.is_some(), ip);
+        if self.user_lockout.is_locked(ukey(), std::time::Instant::now()) {
             return Err(locked());
         }
-        let known = users.user(user);
         let phc = known.map_or(self.dummy_phc.as_str(), |u| u.phc.as_str());
         let key: [u8; 32] = Sha256::digest(format!("{user}\0{password}\0{phc}").as_bytes()).into();
         let cached = known.is_some() && {
@@ -124,7 +131,7 @@ impl ProxyAuth {
             valid && known.is_some()
         };
         if !ok {
-            self.failure(ip, user, sys);
+            self.failure(ip, ukey(), user, sys);
             return Err(fail(407, Reason::AuthFailed, "invalid proxy credentials"));
         }
         if !cached {
@@ -135,21 +142,56 @@ impl ProxyAuth {
             cache.insert(key, Instant::now());
         }
         self.ip_lockout.record_success(ip);
-        self.user_lockout.record_success(user.to_owned());
+        self.user_lockout.record_success(ukey());
         Ok(user.to_owned())
     }
 
-    fn failure(&self, ip: IpAddr, user: &str, sys: &SystemLog) {
+    fn failure(&self, ip: IpAddr, key: (String, IpAddr), user: &str, sys: &SystemLog) {
         let now = std::time::Instant::now();
         let by_ip = self.ip_lockout.record_failure(ip, now);
-        let by_user = !user.is_empty() && self.user_lockout.record_failure(user.to_owned(), now);
+        let by_user = self.user_lockout.record_failure(key, now);
         if by_ip || by_user {
+            // The name is attacker-supplied: capped and stripped of controls (RV3-L4).
+            let user = crate::logger::clean(user, MAX_USER_LEN);
             sys.event(
                 SysEvent::AuthLockout,
                 serde_json::json!({ "ip": ip.to_string(), "user": user, "by": if by_ip { "ip" } else { "user" } }),
             );
         }
     }
+}
+
+/// Command-line overrides (SPEC 6: CLI wins over the file). The proxy re-applies them to every
+/// reloaded config before validation (RV3-M1). `--log-dir` is not policy and is never reloaded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CliOverrides {
+    /// `--listen`.
+    pub listen: Option<SocketAddr>,
+    /// `--mode`.
+    pub mode: Option<Mode>,
+}
+
+impl CliOverrides {
+    /// Apply to `cfg`; validate afterwards.
+    pub fn apply(&self, cfg: &mut Config) {
+        if let Some(listen) = self.listen {
+            cfg.listen = listen;
+        }
+        if let Some(mode) = self.mode {
+            cfg.mode = mode;
+        }
+    }
+}
+
+/// A reload may never leave the bound listener without users unless it is loopback (D-13,
+/// RV3-M1). `bound` is the address actually listened on, not the reloaded file's `listen`.
+pub fn check_reload_exposure(bound: SocketAddr, policies: &PolicySet) -> Result<(), String> {
+    if !bound.ip().is_loopback() && !policies.has_users() {
+        return Err(format!(
+            "listener {bound} is not loopback; a reload may not remove every user (D-13)"
+        ));
+    }
+    Ok(())
 }
 
 /// Releases a connection slot on drop.
@@ -212,7 +254,12 @@ pub struct ProxyDeps {
     /// WASM rule plugins (O10); reloaded with policies.
     pub plugins: arc_swap::ArcSwap<crate::plugins::Plugins>,
     auth: ProxyAuth,
+    /// Open connections per client network (IPv4 or IPv6 /64, RV3-L3).
     per_ip: Mutex<HashMap<IpAddr, usize>>,
+    /// Re-applied on every policy reload (RV3-M1).
+    overrides: CliOverrides,
+    /// The explicit listener's bound address (reload exposure check, D-13).
+    bound: SocketAddr,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -376,8 +423,12 @@ impl ProxyDeps {
     pub fn reload_policies(&self) -> Result<(), String> {
         let path = self.cfg.source.as_ref().ok_or("no config file")?;
         let settings = self.settings.load_full();
-        let result = Config::load(path).map_err(|e| e.to_string()).and_then(|c| {
+        let result = Config::load(path).map_err(|e| e.to_string()).and_then(|mut c| {
+            // The CLI wins on reload too, and the result is validated with it (RV3-M1).
+            self.overrides.apply(&mut c);
+            c.validate().map_err(|e| e.to_string())?;
             let policies = PolicySet::build(&settings.apply(&c))?;
+            check_reload_exposure(self.bound, &policies)?;
             self.policies.store(Arc::new(policies));
             Ok(crate::plugins::Plugins::load(&c.plugins))
         });
@@ -406,7 +457,7 @@ impl ProxyDeps {
     }
 
     fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnGuard> {
-        let ip = fold_ip(ip);
+        let ip = crate::profiles::client_net(ip);
         let mut map = self.per_ip.lock_or_recover();
         let total = self.stats.active_connections.load(Ordering::Relaxed);
         let per_ip = map.get(&ip).copied().unwrap_or(0);
@@ -471,6 +522,25 @@ pub async fn start_with(
     cfg: Config,
     resolver: Option<Arc<dyn Resolver>>,
     orig_dst: Option<Arc<dyn transparent::OriginalDst>>,
+) -> std::io::Result<ProxyHandle> {
+    start_inner(cfg, resolver, orig_dst, CliOverrides::default()).await
+}
+
+/// [`start`] with the command-line overrides already applied to `cfg`; policy reloads re-apply
+/// them (RV3-M1).
+pub async fn start_with_overrides(
+    cfg: Config,
+    resolver: Option<Arc<dyn Resolver>>,
+    overrides: CliOverrides,
+) -> std::io::Result<ProxyHandle> {
+    start_inner(cfg, resolver, None, overrides).await
+}
+
+async fn start_inner(
+    cfg: Config,
+    resolver: Option<Arc<dyn Resolver>>,
+    orig_dst: Option<Arc<dyn transparent::OriginalDst>>,
+    overrides: CliOverrides,
 ) -> std::io::Result<ProxyHandle> {
     let invalid = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, e);
     let template = &cfg.block_page.template;
@@ -559,6 +629,8 @@ pub async fn start_with(
         plugins: arc_swap::ArcSwap::from_pointee(plugins),
         auth: ProxyAuth::new(),
         per_ip: Mutex::new(HashMap::new()),
+        overrides,
+        bound: local_addr,
         shutdown: rx,
     });
     sys.event(

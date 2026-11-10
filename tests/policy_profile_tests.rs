@@ -361,3 +361,72 @@ async fn policy_hot_reload_swaps_and_bad_config_keeps_old() {
     assert_eq!(reloads.len(), 2);
     assert_eq!(reloads[1]["detail"]["ok"], false);
 }
+
+/// RV3-M1: a policy reload keeps `--mode enforce` although the file says `monitor`.
+#[tokio::test]
+async fn rv3_m1_reload_keeps_cli_mode_override() {
+    use webfilter::config::Mode;
+    use webfilter::proxy::CliOverrides;
+    let origin = Origin::start(|_| Reply::ok("hello")).await;
+    let lab = common::Lab::new();
+    lab.write_list("domains.txt", "evil.test\n");
+    let path = lab.write_config(&base_config("mode = \"monitor\""));
+    let overrides = CliOverrides { listen: None, mode: Some(Mode::Enforce) };
+    let mut cfg = Config::load(&path).unwrap();
+    overrides.apply(&mut cfg);
+    let resolver = TestResolver::with(&[("evil.test", "127.0.0.1")]);
+    let handle = webfilter::proxy::start_with_overrides(
+        cfg,
+        Some(resolver as Arc<dyn webfilter::policy::Resolver>),
+        overrides,
+    )
+    .await
+    .unwrap();
+    let port = origin.addr.port();
+    let req = format!(
+        "GET http://evil.test:{port}/ HTTP/1.1\r\nHost: evil.test:{port}\r\nConnection: close\r\n\r\n"
+    );
+    let addr = handle.local_addr;
+    assert_eq!(status(&common::raw_exchange(addr, req.as_bytes(), W).await), 403, "CLI enforce");
+    handle.deps.reload_policies().unwrap();
+    assert_eq!(
+        status(&common::raw_exchange(addr, req.as_bytes(), W).await),
+        403,
+        "still enforced after a reload"
+    );
+    assert_eq!(handle.deps.mode(), Mode::Enforce);
+    handle.shutdown().await;
+    assert!(origin.requests().is_empty(), "nothing reached the blocked origin");
+}
+
+/// RV3-M1: a reload that would leave a non-loopback listener without users is refused (D-13),
+/// judged by the bound address; the CLI `--listen` is validated on reload too.
+#[test]
+fn rv3_m1_reload_refuses_open_non_loopback_listener() {
+    use webfilter::proxy::{CliOverrides, check_reload_exposure};
+    let wild: std::net::SocketAddr = "0.0.0.0:8080".parse().unwrap();
+    let local: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let no_users = PolicySet::build(&cfg("")).unwrap();
+    assert!(check_reload_exposure(wild, &no_users).is_err());
+    assert!(check_reload_exposure(local, &no_users).is_ok());
+    let hash = webfilter::auth::hash_password(b"pw").unwrap();
+    let with_users = PolicySet::build(&cfg(&format!(
+        "[[users]]\nusername = \"alice\"\npassword_hash = \"{hash}\"\nprofile = \"default\"\n"
+    )))
+    .unwrap();
+    assert!(check_reload_exposure(wild, &with_users).is_ok());
+    let mut c = cfg("");
+    CliOverrides { listen: Some(wild), mode: None }.apply(&mut c);
+    assert!(c.validate().is_err(), "file loopback + CLI 0.0.0.0 + no users is invalid");
+}
+
+/// RV3-L3: the per-IP connection cap keys by the same client network as lockouts and limits.
+#[test]
+fn rv3_l3_client_net_folds_mapped_and_ipv6_64() {
+    use webfilter::profiles::client_net;
+    assert_eq!(client_net(ip("2001:db8:1:2:aaaa::1")), client_net(ip("2001:db8:1:2::9")));
+    assert_eq!(client_net(ip("2001:db8:1:2:aaaa::1")), ip("2001:db8:1:2::"));
+    assert_ne!(client_net(ip("2001:db8:1:2::1")), client_net(ip("2001:db8:1:3::1")));
+    assert_eq!(client_net(ip("::ffff:10.0.0.7")), ip("10.0.0.7"));
+    assert_eq!(client_net(ip("10.0.0.7")), ip("10.0.0.7"));
+}
