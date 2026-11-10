@@ -813,6 +813,6 @@ async fn l6_snapshot_report_never_written_through_symlink() {
     let r = client(p.addr, out.path(), &["--snapshot", "--json", &url]).await;
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep", "{} {}", r.stdout, r.stderr);
     assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-    assert!(r.stdout.contains("symlink"), "refusal reported: {}", r.stdout);
+    assert!(r.stderr.contains("symlink"), "refusal reported as a warning: {}", r.stderr);
     p.stop().await;
 }
