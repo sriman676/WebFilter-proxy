@@ -14,8 +14,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, reason, status};
-use webfilter::config::{PluginConfig, PluginOnError};
+use common::{
+    Origin, ProxyHarness, Reply, TestResolver, base_config, raw_exchange, reason, status,
+};
+use webfilter::config::{Config, PluginConfig, PluginOnError};
 use webfilter::plugins::{Outcome, Plugins};
 
 /// The shipped example (`plugins/examples/block_keyword.wat`): blocks views containing `/ads`.
@@ -50,6 +52,12 @@ fn plugin_toml(name: &str, path: &Path, on_error: &str) -> String {
     format!(
         "[[plugins]]\nname = \"{name}\"\npath = \"{}\"\nenabled = true\non_error = \"{on_error}\"\n",
         path.display()
+    )
+}
+
+fn get_req(host: &str, port: u16) -> String {
+    format!(
+        "GET http://{host}:{port}/ HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
     )
 }
 
@@ -211,5 +219,83 @@ async fn e86_plugins_only_add_blocks() {
         stats.iter().map(|s| (s.0.as_str(), s.2)).collect::<Vec<_>>(),
         [("never", 0), ("kw", 2)]
     );
+    h.stop().await;
+}
+
+/// RV2-L3: a broken plugin on reload keeps only the old plugin set; new policies still apply.
+#[tokio::test]
+async fn rv2_l3_broken_plugin_does_not_hold_back_new_policies() {
+    let dir = tempfile::tempdir().unwrap();
+    let kw = write(dir.path(), "kw", KEYWORD);
+    let origin = Origin::start(|_| Reply::ok("fine")).await;
+    let port = origin.addr.port();
+    let mut h = proxy(&plugin_toml("kw", &kw, "block"), &[]).await;
+    assert_eq!(status(&h.get("bad.test", port, "/news").await), 200);
+    let path = h.lab.path().join("config.toml");
+    let base = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{base}\n[[profiles]]\nname = \"default\"\nextra_blocked_domains = [\"bad.test\"]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(&kw, "(module garbage").unwrap();
+    let err = h.handle.as_ref().unwrap().deps.reload_policies().unwrap_err();
+    assert!(err.contains("plugins"), "{err}");
+    let r = h.get("bad.test", port, "/news").await;
+    assert_eq!(status(&r), 403, "the new profile is active: {r}");
+    let r = h.get("ok.test", port, "/ads/x").await;
+    assert_eq!((status(&r), reason(&r).as_str()), (403, "plugin_rule"), "old plugin kept: {r}");
+    h.stop().await;
+    let reloads: Vec<_> =
+        h.system_lines().into_iter().filter(|v| v["kind"] == "policy_reloaded").collect();
+    assert_eq!(reloads.len(), 1);
+    assert_eq!(reloads[0]["detail"]["ok"], true);
+    assert!(reloads[0]["detail"]["plugins_error"].is_string(), "{:?}", reloads[0]);
+}
+
+/// RV2-L2: fuel is bounded in config (a slow plugin would otherwise hold a call for seconds).
+#[test]
+fn rv2_l2_fuel_above_the_bound_is_rejected() {
+    let lab = common::Lab::new();
+    let kw = write(lab.path(), "kw", KEYWORD);
+    let toml = |fuel: u64| format!("{}fuel = {fuel}\n", plugin_toml("kw", &kw, "block"));
+    let err = Config::parse(&toml(1_000_000_000), lab.path(), None).unwrap_err();
+    assert!(err.to_string().contains("plugins.fuel"), "{err}");
+    let ok = Config::parse(&toml(100_000_000), lab.path(), None);
+    assert!(ok.is_ok(), "{ok:?}");
+}
+
+/// RV2-L2: fuel-burning plugin calls never stall a worker, so unrelated requests stay fast.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rv2_l2_slow_plugins_do_not_stall_unrelated_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let spin = write(dir.path(), "spin", &module("(loop $l (br $l)) (i32.const 0)", ""));
+    let origin = Origin::start(|_| Reply::ok("fine")).await;
+    let port = origin.addr.port();
+    let toml = format!("{}fuel = 100000000\n", plugin_toml("spin", &spin, "block"));
+    let mut h = proxy(&toml, &[("domains.txt", "bad.test\n")]).await;
+    let addr = h.addr;
+    let slow: Vec<_> = (0..20)
+        .map(|_| {
+            let r = get_req("ok.test", port);
+            tokio::spawn(
+                async move { raw_exchange(addr, r.as_bytes(), Duration::from_secs(30)).await },
+            )
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A list block never runs plugins; it must not wait behind the fuel-burning calls.
+    let started = std::time::Instant::now();
+    let unrelated = get_req("bad.test", port);
+    let r = raw_exchange(addr, unrelated.as_bytes(), Duration::from_secs(10)).await;
+    let took = started.elapsed();
+    assert_eq!((status(&r), reason(&r).as_str()), (403, "domain_blocklist"), "{r}");
+    assert!(took < Duration::from_secs(3), "unrelated request stalled for {took:?}");
+    for t in slow {
+        let r = t.await.unwrap();
+        assert_eq!((status(&r), reason(&r).as_str()), (403, "plugin_error"), "{r}");
+    }
     h.stop().await;
 }
