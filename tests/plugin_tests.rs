@@ -14,7 +14,9 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, raw_exchange, reason, status};
+use common::{
+    Origin, ProxyHarness, Reply, TestResolver, base_config, raw_exchange, reason, status,
+};
 use webfilter::config::{Config, PluginConfig, PluginOnError};
 use webfilter::plugins::{Outcome, Plugins};
 
@@ -278,9 +280,9 @@ async fn rv2_l2_slow_plugins_do_not_stall_unrelated_requests() {
     let slow: Vec<_> = (0..20)
         .map(|_| {
             let r = get_req("ok.test", port);
-            tokio::spawn(async move {
-                raw_exchange(addr, r.as_bytes(), Duration::from_secs(30)).await
-            })
+            tokio::spawn(
+                async move { raw_exchange(addr, r.as_bytes(), Duration::from_secs(30)).await },
+            )
         })
         .collect();
     tokio::time::sleep(Duration::from_millis(100)).await;
