@@ -112,9 +112,6 @@ pentest-p13:
     scripts/pentest_p13.sh
 pentest-p14:
     scripts/pentest_p14.sh
-# Consolidated final pentest (A-29): all phase suites.
-pentest-all:
-    scripts/pentest_all.sh
 # Whole-codebase pentest in one run (A-50).
 pentest-full:
     scripts/pentest_full.sh

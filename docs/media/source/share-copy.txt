@@ -1,0 +1,1 @@
+Every request gets a verdict. WebFilter Proxy is a web filter I built in Rust: smuggling-resistant HTTP parsing, verified TLS, block pages that say why, and a live dashboard, doing 17,764 req/s on loopback with 0 errors.

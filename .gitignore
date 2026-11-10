@@ -38,3 +38,9 @@ brag-output*/
 __pycache__/
 *.pyc
 brag-output/
+# Launch-video render outputs (sources in docs/media/source are tracked)
+docs/media/source/frames/
+docs/media/source/stills/
+docs/media/source/chrome-profile/
+docs/media/source/*.wav
+docs/media/source/*.png
