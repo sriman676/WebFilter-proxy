@@ -159,7 +159,15 @@ impl Admin {
         if !self.hosts.contains(&host) {
             return plain(StatusCode::MISDIRECTED_REQUEST, "unknown host");
         }
-        // 2. Cross-origin state changes are refused (no CORS, ever).
+        // 2. Requests a browser marks as cross-site are refused on every method, and cross-origin
+        //    state changes are refused (no CORS, ever).
+        if req
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"cross-site"))
+        {
+            return plain(StatusCode::FORBIDDEN, "cross-site request refused");
+        }
         let changing = req.method() != Method::GET && req.method() != Method::HEAD;
         if changing
             && let Some(o) = req.headers().get(header::ORIGIN)
@@ -276,8 +284,14 @@ impl Admin {
             admin.deps.logger.admin("unknown", &ip.to_string(), "auth", "", "auth_failed");
             Err(Box::new(err(StatusCode::UNAUTHORIZED, "a valid Bearer token is required")))
         };
+        // A missing token is not an authentication attempt: web pages can make token-less requests
+        // (images, links) but can never attach a Bearer token without CORS, so they cannot drive the
+        // lockout (RV1-M3).
         if token.is_empty() {
-            return fail(self);
+            return Err(Box::new(err(
+                StatusCode::UNAUTHORIZED,
+                "a valid Bearer token is required",
+            )));
         }
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let hit = |cache: &Mutex<Option<[u8; 32]>>| {

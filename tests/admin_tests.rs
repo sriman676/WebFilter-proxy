@@ -106,6 +106,41 @@ async fn ah_host_header_corpus() {
     h.stop().await;
 }
 
+/// RV1-M3: token-less requests (what a web page can send) never drive the lockout, and requests a
+/// browser marks as cross-site are refused.
+#[tokio::test]
+async fn rv1_m3_web_pages_cannot_lock_the_admin_out() {
+    let (mut h, a) = lab("", &[]).await;
+    let host = format!("127.0.0.1:{}", a.port());
+    for _ in 0..10 {
+        let r = admin(a, "GET", "/api/v1/stats", Some(&host), "", "").await;
+        assert_eq!(status(&r), 401);
+    }
+    let ok = admin(a, "GET", "/api/v1/stats", Some(&host), &auth(), "").await;
+    assert_eq!(status(&ok), 200, "no lockout from token-less requests: {ok}");
+    let cross = admin(
+        a,
+        "GET",
+        "/api/v1/stats",
+        Some(&host),
+        &format!("{}Sec-Fetch-Site: cross-site\r\n", auth()),
+        "",
+    )
+    .await;
+    assert_eq!(status(&cross), 403, "cross-site fetch refused even with a token");
+    let same = admin(
+        a,
+        "GET",
+        "/api/v1/stats",
+        Some(&host),
+        &format!("{}Sec-Fetch-Site: same-origin\r\n", auth()),
+        "",
+    )
+    .await;
+    assert_eq!(status(&same), 200);
+    h.stop().await;
+}
+
 #[tokio::test]
 async fn auth_lockout_origin_and_security_headers() {
     let (mut h, a) = lab("", &[]).await;
