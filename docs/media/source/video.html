@@ -1,0 +1,250 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>WebFilter Proxy</title>
+<style>
+:root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --muted:#8b949e;
+        --accent:#58a6ff; --ok:#3fb950; --bad:#f85149; --warn:#d29922; }
+* { box-sizing:border-box; }
+html,body { margin:0; width:1920px; height:1080px; overflow:hidden; background:var(--bg); color:var(--text);
+            font-family:"Segoe UI", system-ui, sans-serif; }
+.scene { position:absolute; inset:0; opacity:0; }
+.glow { position:absolute; inset:0; background:
+        radial-gradient(900px 600px at 20% 15%, rgba(88,166,255,.10), transparent 60%),
+        radial-gradient(800px 600px at 85% 90%, rgba(63,185,80,.08), transparent 60%); }
+.mono { font-family:Consolas, "Cascadia Mono", ui-monospace, monospace; }
+.logo { width:22px; height:22px; border-radius:6px; background:linear-gradient(135deg, var(--accent), var(--ok)); }
+
+/* 1 terminal */
+.term { position:absolute; left:210px; top:250px; width:1500px; height:520px; background:#010409;
+        border:1px solid var(--line); border-radius:16px; box-shadow:0 40px 120px rgba(0,0,0,.6); overflow:hidden; }
+.term .bar { height:52px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; padding:0 20px; }
+.dot { width:14px; height:14px; border-radius:50%; }
+.term .bar span.t { margin-left:16px; color:var(--muted); font-size:20px; }
+.term pre { margin:0; padding:34px 40px; font-size:31px; line-height:1.75; white-space:pre-wrap; }
+.prompt { color:var(--ok); }
+.line { opacity:0; }
+.okw { color:var(--ok); font-weight:700; }
+.badw { color:var(--bad); font-weight:700; }
+.dim { color:var(--muted); }
+.flash { position:absolute; inset:0; background:var(--bad); opacity:0; mix-blend-mode:screen; }
+
+/* 2 / 6 title */
+.center { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.biglogo { width:120px; height:120px; border-radius:30px; background:linear-gradient(135deg, var(--accent), var(--ok));
+           box-shadow:0 0 120px rgba(88,166,255,.35); }
+.title { font-size:132px; font-weight:800; letter-spacing:-.03em; margin-top:46px; }
+.tag { font-size:52px; color:var(--muted); margin-top:18px; }
+.tag b { color:var(--text); font-weight:600; }
+
+/* 3 block page */
+.browser { position:absolute; left:760px; top:150px; width:1020px; height:780px; background:#fff; border-radius:16px;
+           overflow:hidden; box-shadow:0 40px 120px rgba(0,0,0,.6); }
+.browser .bar { height:56px; background:#e9ecef; display:flex; align-items:center; gap:10px; padding:0 18px; }
+.browser .url { margin-left:14px; flex:1; height:34px; border-radius:17px; background:#fff; color:#555; font-size:19px;
+                display:flex; align-items:center; padding:0 18px; }
+.page { font-family:sans-serif; color:#222; padding:44px 60px; font-size:24px; line-height:1.5; }
+.page h1 { font-size:46px; margin:0 0 22px; }
+.page code { background:#eee; padding:0 .3em; font-size:22px; }
+.page p { margin:0 0 18px; }
+.page .hl { position:relative; }
+.page .hl::after { content:""; position:absolute; left:-12px; right:-12px; top:-4px; bottom:-4px; border-radius:8px;
+                   border:3px solid var(--bad); opacity:var(--hl,0); }
+.page textarea { width:100%; height:70px; font-size:18px; border:1px solid #bbb; border-radius:6px; padding:8px; }
+.page button { margin-top:10px; font-size:20px; padding:8px 18px; border-radius:6px; border:1px solid #0969da; background:#0969da; color:#fff; }
+.side { position:absolute; left:140px; top:390px; width:560px; }
+.side .k { color:var(--bad); font-size:26px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
+.side .h { font-size:76px; font-weight:800; line-height:1.05; margin-top:14px; letter-spacing:-.02em; }
+
+/* 4 dashboard (assets/admin/style.css) */
+.dash { position:absolute; left:110px; top:110px; width:1700px; height:690px; background:var(--bg); border:1px solid var(--line);
+        border-radius:16px; overflow:hidden; box-shadow:0 40px 120px rgba(0,0,0,.6); font-size:21px; }
+.top { display:flex; align-items:center; justify-content:space-between; padding:18px 28px; border-bottom:1px solid var(--line); background:var(--panel); }
+.brand { display:flex; align-items:center; gap:14px; }
+.brand h1 { font-size:27px; margin:0; }
+.brand .logo { width:30px; height:30px; border-radius:8px; }
+.badge { padding:3px 12px; border-radius:999px; border:1px solid var(--ok); color:var(--ok); font-size:16px; text-transform:uppercase; }
+.tabs { display:flex; gap:6px; padding:12px 28px; border-bottom:1px solid var(--line); }
+.tabs span { color:var(--muted); padding:10px 16px; border-radius:6px; font-size:19px; }
+.tabs span.active { background:var(--panel); color:var(--text); box-shadow:inset 0 -3px 0 var(--accent); }
+.dmain { padding:24px 28px; }
+.tiles { display:grid; grid-template-columns:repeat(4, 1fr); gap:18px; margin-bottom:24px; }
+.tile { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 20px; }
+.tile .k { color:var(--muted); font-size:16px; text-transform:uppercase; letter-spacing:.04em; }
+.tile .v { font-size:40px; font-weight:600; margin-top:6px; font-variant-numeric:tabular-nums; }
+table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+th, td { text-align:left; padding:11px 16px; border-bottom:1px solid var(--line); }
+th { color:var(--muted); font-weight:500; font-size:16px; text-transform:uppercase; }
+td { font-size:20px; }
+tr.row { opacity:0; }
+.pill { padding:2px 12px; border-radius:999px; font-size:16px; border:1px solid var(--line); }
+.pill.blocked { color:var(--bad); border-color:var(--bad); }
+.pill.allowed { color:var(--ok); border-color:var(--ok); }
+.cap { position:absolute; left:0; right:0; top:900px; text-align:center; font-size:54px; font-weight:700; letter-spacing:-.01em; }
+.cap span { color:var(--accent); }
+
+/* 5 proof */
+.proof { position:absolute; left:160px; right:160px; top:300px; display:grid; grid-template-columns:1fr 1fr; gap:36px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:22px; padding:44px 50px; opacity:0; }
+.card .n { font-size:104px; font-weight:800; letter-spacing:-.03em; font-variant-numeric:tabular-nums;
+           background:linear-gradient(135deg, var(--text), var(--accent)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+.card .d { font-size:34px; color:var(--muted); margin-top:6px; }
+.proofhead { position:absolute; left:160px; top:200px; font-size:40px; color:var(--muted); letter-spacing:.14em; text-transform:uppercase; font-weight:600; }
+.out .sub { font-size:46px; color:var(--muted); margin-top:20px; }
+.chips { display:flex; gap:16px; margin-top:44px; }
+.chip { font-size:26px; padding:10px 22px; border-radius:999px; border:1px solid var(--line); color:var(--text); background:var(--panel); }
+</style></head>
+<body>
+<div class="glow"></div>
+
+<!-- 1 hook: the real client output format -->
+<div class="scene" id="s1">
+  <div class="term" id="term">
+    <div class="bar"><span class="dot" style="background:#f85149"></span><span class="dot" style="background:#d29922"></span><span class="dot" style="background:#3fb950"></span><span class="t mono">webfilter-client</span></div>
+<pre class="mono"><span class="prompt">$ </span><span id="cmd"></span><span id="caret">▍</span>
+<span class="line" id="l1"><span class="okw">OK</span> 200 18342 http://news.example/ <span class="dim">-&gt; output/news.example.html</span></span>
+<span class="line" id="l2"><span class="okw">OK</span> 200 9127 http://docs.example/guide <span class="dim">-&gt; output/docs.example_guide.html</span></span>
+<span class="line" id="l3"><span class="badw">BLOCKED 403</span> 0 http://ads.tracker.example/ <span class="dim">-&gt;</span> <span class="badw">domain_blocklist</span> <span class="dim">(event 01JC9Q2N7Z)</span></span>
+</pre>
+    <div class="flash" id="flash"></div>
+  </div>
+</div>
+
+<!-- 2 reveal -->
+<div class="scene center" id="s2">
+  <div class="biglogo" id="s2logo"></div>
+  <div class="title" id="s2title">WebFilter Proxy</div>
+  <div class="tag" id="s2tag">Every request gets a <b>verdict</b>.</div>
+</div>
+
+<!-- 3 the real default block page -->
+<div class="scene" id="s3">
+  <div class="side" id="s3side"><div class="k">Blocked</div><div class="h">Blocked pages<br>say why.</div></div>
+  <div class="browser" id="s3br">
+    <div class="bar"><span class="dot" style="background:#f85149"></span><span class="dot" style="background:#d29922"></span><span class="dot" style="background:#3fb950"></span><div class="url mono">http://ads.tracker.example/</div></div>
+    <div class="page">
+      <h1>Access blocked</h1>
+      <p>The request to <code>ads.tracker.example</code> was blocked by the web filter.</p>
+      <p class="hl" id="hl">Reason: <code>domain_blocklist</code><br>Rule: <code>tracker.example</code><br>Category: <code>ads</code></p>
+      <p>Event id: <code>01JC9Q2N7Z</code> (2026-11-10T09:41:07Z)</p>
+      <p style="margin-top:26px">Need it for work? Ask for access:</p>
+      <textarea>Course research on ad networks</textarea><br><button>Request access</button>
+    </div>
+  </div>
+</div>
+
+<!-- 4 the real dashboard -->
+<div class="scene" id="s4">
+  <div class="dash" id="dash">
+    <div class="top"><div class="brand"><span class="logo"></span><h1>WebFilter</h1><span class="badge">enforce</span></div><span class="dim" style="font-size:18px">admin · 127.0.0.1:9090</span></div>
+    <div class="tabs"><span class="active">Overview</span><span>Live events</span><span>Top blocked</span><span>Clients</span><span>Lists</span><span>Rules &amp; schedules</span><span>Feeds</span><span>Scans</span><span>Access requests</span><span>Audit</span></div>
+    <div class="dmain">
+      <div class="tiles">
+        <div class="tile"><div class="k">Requests</div><div class="v" id="t1">0</div></div>
+        <div class="tile"><div class="k">Blocked</div><div class="v" id="t2" style="color:var(--bad)">0</div></div>
+        <div class="tile"><div class="k">Active connections</div><div class="v" id="t3">0</div></div>
+        <div class="tile"><div class="k">Malware stopped</div><div class="v" id="t4">0</div></div>
+      </div>
+      <table>
+        <tr><th>Time</th><th>Client</th><th>Host</th><th>Action</th><th>Reason</th></tr>
+        <tr class="row"><td class="mono">09:41:07</td><td>lab-pc-12</td><td>news.example</td><td><span class="pill allowed">allowed</span></td><td class="dim">-</td></tr>
+        <tr class="row"><td class="mono">09:41:07</td><td>lab-pc-04</td><td>ads.tracker.example</td><td><span class="pill blocked">blocked</span></td><td>domain_blocklist</td></tr>
+        <tr class="row"><td class="mono">09:41:08</td><td>lab-pc-12</td><td>docs.example</td><td><span class="pill allowed">allowed</span></td><td class="dim">-</td></tr>
+        <tr class="row"><td class="mono">09:41:08</td><td>lab-pc-07</td><td>files.example/setup.exe</td><td><span class="pill blocked">blocked</span></td><td>malware_detected</td></tr>
+        <tr class="row"><td class="mono">09:41:09</td><td>lab-pc-02</td><td>games.example</td><td><span class="pill blocked">blocked</span></td><td>category: games (school hours)</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="cap" id="s4cap">Live dashboard. Safe edits. <span>One-click rollback.</span></div>
+</div>
+
+<!-- 5 proof -->
+<div class="scene" id="s5">
+  <div class="proofhead" id="ph">Measured, not promised</div>
+  <div class="proof">
+    <div class="card" id="c1"><div class="n">17,764</div><div class="d">requests/s, 0 errors</div></div>
+    <div class="card" id="c2"><div class="n">13,741</div><div class="d">requests/s with TLS interception</div></div>
+    <div class="card" id="c3"><div class="n">324</div><div class="d">tests + 22 fuzz targets</div></div>
+    <div class="card" id="c4"><div class="n">147/147</div><div class="d">h2spec HTTP/2 conformance</div></div>
+  </div>
+</div>
+
+<!-- 6 outro -->
+<div class="scene center out" id="s6">
+  <div class="biglogo" id="s6logo"></div>
+  <div class="title">WebFilter Proxy</div>
+  <div class="sub">Built in Rust. Filters every request.</div>
+  <div class="chips" id="chips"><span class="chip">HTTP/1 + HTTP/2</span><span class="chip">TLS interception</span><span class="chip">ClamAV + YARA</span><span class="chip">OpenSearch SIEM</span></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const out3 = (x) => 1 - Math.pow(1 - x, 3);
+const outBack = (x) => { const c = 1.6; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+// Scene opacity: in over `i` s after a, out over `o` s before b (dip through the background).
+const env = (t, a, b, i = 0.35, o = 0.3) => Math.min(prog(t, a, a + i), 1 - prog(t, b - o, b));
+const S = [[0, 3.5], [3.5, 6.0], [6.0, 10.0], [10.0, 14.5], [14.5, 18.0], [18.0, 20.0]];
+const CMD = "webfilter-client news.example docs.example/guide ads.tracker.example";
+const fmt = (n) => Math.round(n).toLocaleString("en-US");
+
+function render(t) {
+  S.forEach(([a, b], i) => {
+    const last = i === S.length - 1;
+    $("s" + (i + 1)).style.opacity = env(t, a, b, i === 0 ? 0.01 : 0.35, last ? 0.01 : 0.3);
+  });
+  // 1 hook
+  const n = Math.floor(CMD.length * prog(t, 0.1, 0.95));
+  $("cmd").textContent = CMD.slice(0, n);
+  $("caret").style.opacity = t < 1.0 ? 1 : 0;
+  [["l1", 1.0], ["l2", 1.5], ["l3", 2.0]].forEach(([id, at]) => {
+    const p = out3(prog(t, at, at + 0.18));
+    $(id).style.opacity = p;
+    $(id).style.display = "inline-block";
+    $(id).style.transform = `translateY(${(1 - p) * 14}px)`;
+  });
+  const hit = prog(t, 2.0, 2.45);
+  $("flash").style.opacity = t >= 2.0 ? (1 - hit) * 0.28 : 0;
+  const shake = t >= 2.0 && t < 2.3 ? Math.sin((t - 2.0) * 90) * 9 * (1 - prog(t, 2.0, 2.3)) : 0;
+  $("term").style.transform = `translateX(${shake}px) scale(${1 + 0.02 * prog(t, 2.0, 3.5)})`;
+  // 2 reveal
+  const r = outBack(prog(t, 3.55, 4.0));
+  $("s2logo").style.transform = `scale(${0.4 + 0.6 * r}) rotate(${(1 - r) * -25}deg)`;
+  const tt = out3(prog(t, 3.75, 4.15));
+  $("s2title").style.opacity = tt; $("s2title").style.transform = `translateY(${(1 - tt) * 40}px)`;
+  const tg = out3(prog(t, 4.0, 4.4));
+  $("s2tag").style.opacity = tg; $("s2tag").style.transform = `translateY(${(1 - tg) * 30}px)`;
+  // 3 block page
+  const b3 = out3(prog(t, 6.05, 6.6));
+  $("s3br").style.transform = `translateY(${(1 - b3) * 120}px)`;
+  const sd = out3(prog(t, 6.3, 6.8));
+  $("s3side").style.opacity = sd; $("s3side").style.transform = `translateX(${(1 - sd) * -50}px)`;
+  document.querySelector(".page").style.setProperty("--hl", String(out3(prog(t, 7.5, 7.9))));
+  // 4 dashboard
+  const d4 = out3(prog(t, 10.05, 10.55));
+  $("dash").style.transform = `translateY(${(1 - d4) * 80}px) scale(${0.97 + 0.03 * d4})`;
+  const c = out3(prog(t, 10.4, 13.6));
+  $("t1").textContent = fmt(12480 * c); $("t2").textContent = fmt(1206 * c);
+  $("t3").textContent = fmt(37 * c); $("t4").textContent = fmt(3 * c);
+  document.querySelectorAll("tr.row").forEach((row, i) => {
+    const p = out3(prog(t, 11.0 + i * 0.5, 11.25 + i * 0.5));
+    row.style.opacity = p; row.style.transform = `translateX(${(1 - p) * -30}px)`;
+  });
+  const cp = out3(prog(t, 10.5, 10.9));
+  $("s4cap").style.opacity = cp; $("s4cap").style.transform = `translateY(${(1 - cp) * 30}px)`;
+  // 5 proof
+  $("ph").style.opacity = out3(prog(t, 14.55, 14.9));
+  ["c1", "c2", "c3", "c4"].forEach((id, i) => {
+    const p = outBack(prog(t, 15.0 + i * 0.5, 15.4 + i * 0.5));
+    $(id).style.opacity = clamp(p * 1.2); $(id).style.transform = `translateY(${(1 - p) * 60}px) scale(${0.94 + 0.06 * p})`;
+  });
+  // 6 outro
+  const o = outBack(prog(t, 18.0, 18.45));
+  $("s6logo").style.transform = `scale(${0.5 + 0.5 * o})`;
+  const ch = out3(prog(t, 18.4, 18.8));
+  $("chips").style.opacity = ch; $("chips").style.transform = `translateY(${(1 - ch) * 24}px)`;
+}
+window.render = render;
+const q = new URLSearchParams(location.search).get("t");
+render(q === null ? 0 : parseFloat(q));
+</script>
+</body></html>
