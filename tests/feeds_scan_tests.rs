@@ -807,3 +807,26 @@ async fn l7_feed_key_not_sent_to_same_host_other_port() {
         "key never sent to another port: {b:?}"
     );
 }
+
+/// RV2-L5: size and hash cover only stored bytes; delivery never repeats the rejected chunk.
+#[tokio::test]
+async fn rv2_l5_slot_counts_only_stored_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = webfilter::config::ScanConfig {
+        temp_dir: dir.path().join("t"),
+        max_bytes: 10,
+        ..Default::default()
+    };
+    let s = Scanner::new(cfg).unwrap();
+    let mut slot = s.begin().await.unwrap();
+    assert!(slot.write(b"0123456").is_ok());
+    assert!(slot.write(b"789ab").is_err(), "crosses max_bytes");
+    assert!(slot.write(b"c").is_err(), "stays stopped");
+    assert_eq!(slot.bytes, 7, "only the stored length is counted");
+    let (v, sha) = s.finish(&mut slot).await;
+    assert!(matches!(v, webfilter::scan::Verdict::Unscannable(_)), "{v:?}");
+    assert_eq!(sha, hex::encode(Sha256::digest(b"0123456")));
+    let mut out = Vec::new();
+    let n = slot.deliver(&mut out, Duration::from_secs(5)).await.unwrap();
+    assert_eq!((n, out.as_slice()), (7, &b"0123456"[..]));
+}

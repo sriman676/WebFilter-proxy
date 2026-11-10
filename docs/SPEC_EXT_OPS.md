@@ -108,7 +108,7 @@ One Manifest V3 codebase for Chrome/Chromium (>= 121) and Firefox (>= 128); load
   `/metrics`); any state change answers 403 and is audited with actor `readonly`. Lockout and caching as O1.
 
 ## O10. Rule plugins (`plugins` cargo feature, off by default; Phase 14, A-30)
-- Config: `[[plugins]] name, path (.wasm or .wat, <= 4 MiB), enabled = false, fuel = 1000000,
+- Config: `[[plugins]] name, path (.wasm or .wat, <= 4 MiB), enabled = false, fuel = 1000000 (1000..=100000000),
   max_memory_bytes = 1048576, on_error = "block" | "allow" (default "block")`. Plugins configured in a binary
   built without the feature is a config error (fail closed). Names are unique, `[a-z0-9_-]{1,32}`.
 - Sandbox: wasmtime with fuel metering and a memory limiter; the module must import nothing (no WASI, no host

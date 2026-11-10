@@ -963,7 +963,7 @@ pub struct PluginConfig {
     pub path: PathBuf,
     /// Off unless enabled.
     pub enabled: bool,
-    /// Fuel per call.
+    /// Fuel per call (1000..=100000000).
     pub fuel: u64,
     /// Linear memory cap.
     pub max_memory_bytes: usize,
@@ -1312,8 +1312,8 @@ impl Config {
             if !name_ok || !names.insert(p.name.as_str()) {
                 return Err(invalid("plugins.name", "unique, [a-z0-9_-]{1,32}"));
             }
-            if !(1_000..=1_000_000_000).contains(&p.fuel) {
-                return Err(invalid("plugins.fuel", format!("{}: 1000..=1000000000", p.name)));
+            if !(1_000..=100_000_000).contains(&p.fuel) {
+                return Err(invalid("plugins.fuel", format!("{}: 1000..=100000000", p.name)));
             }
             if !(65_536..=64 * 1024 * 1024).contains(&p.max_memory_bytes) {
                 return Err(invalid(

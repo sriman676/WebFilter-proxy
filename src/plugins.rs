@@ -270,11 +270,20 @@ impl Plugins {
     }
 
     /// Run the plugins in order on `view`; the first block or error decides.
+    ///
+    /// WASM runs synchronously and can take up to its fuel budget, so on a multi-thread tokio
+    /// runtime it runs inside `block_in_place` and never stalls a worker (RV2-L2). Elsewhere
+    /// (current-thread runtime, where `block_in_place` would panic, or no runtime) it runs
+    /// directly.
     pub fn check(&self, view: &[u8]) -> Option<Outcome> {
         #[cfg(feature = "plugins")]
-        for p in &self.list {
-            if let Some(o) = p.check(view) {
-                return Some(o);
+        {
+            if !self.list.is_empty() {
+                let run = || self.list.iter().find_map(|p| p.check(view));
+                let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|h| {
+                    h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+                });
+                return if multi_thread { tokio::task::block_in_place(run) } else { run() };
             }
         }
         let _ = view;
