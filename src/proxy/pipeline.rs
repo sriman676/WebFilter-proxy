@@ -677,8 +677,7 @@ where
         .map_err(|_| fail(502, Reason::UpstreamError, "bad upstream framing"))?;
     let content_type =
         single(&resp.headers, "content-type").map(|v| String::from_utf8_lossy(v).into_owned());
-    ev.http_content_type =
-        content_type.as_deref().map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
+    ev.http_content_type = content_type.as_deref().map(|c| crate::util::media_type(c).to_owned());
     let d = deps.evaluate(
         t,
         Phase::ResponseHeaders { content_type: content_type.as_deref() },

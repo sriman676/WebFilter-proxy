@@ -24,6 +24,7 @@ use url::Url;
 use crate::naming::{output_filename, write_unique};
 use crate::proxy::http1::{Limits, parse_response_head, single};
 use crate::proxy::io::{IoError, read_head};
+use crate::util::LockExt;
 
 /// Client settings (SPEC 5.1).
 #[derive(Debug, Clone)]
@@ -513,7 +514,7 @@ impl Client {
     }
 
     fn keep_partial(&self, url: &Url, name: &str) {
-        let p = self.partials.lock().unwrap_or_else(|e| e.into_inner()).remove(url.as_str());
+        let p = self.partials.lock_or_recover().remove(url.as_str());
         if let Some(p) =
             p.filter(|p| !p.data.is_empty() && (p.etag.is_some() || p.last_modified.is_some()))
         {
@@ -539,7 +540,7 @@ impl Client {
                 return Err(e);
             }
         };
-        self.partials.lock().unwrap_or_else(|e| e.into_inner()).remove(original.as_str());
+        self.partials.lock_or_recover().remove(original.as_str());
         match outcome {
             Outcome::Blocked { info, page } => {
                 result.blocked = true;
@@ -590,7 +591,7 @@ impl Client {
                 }
                 result.bytes = body.len() as u64;
                 result.content_type = header(hyper::header::CONTENT_TYPE)
-                    .map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
+                    .map(|c| crate::util::media_type(&c).to_owned());
                 if !(200..300).contains(&status) {
                     return Err(ClientError::Protocol(format!("HTTP {status}")));
                 }
@@ -688,7 +689,7 @@ impl Client {
             let media = headers
                 .get(hyper::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
-                .map(|c| c.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+                .map(|c| crate::util::media_type(c).to_ascii_lowercase())
                 .unwrap_or_default();
             if !(200..300).contains(&status) {
                 omit(&mut omitted, &url, &format!("HTTP {status}"), None);
@@ -901,7 +902,7 @@ impl Client {
                 etag: header("etag"),
                 last_modified: header("last-modified"),
             };
-            self.partials.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_owned(), p);
+            self.partials.lock_or_recover().insert(key.to_owned(), p);
         }
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|e| ClientError::Network(e.to_string()))?;
@@ -910,10 +911,7 @@ impl Client {
                     return Err(ClientError::TooLarge);
                 }
                 data.extend_from_slice(chunk);
-                if track
-                    && let Some(p) =
-                        self.partials.lock().unwrap_or_else(|e| e.into_inner()).get_mut(key)
-                {
+                if track && let Some(p) = self.partials.lock_or_recover().get_mut(key) {
                     p.data.extend_from_slice(chunk);
                 }
             }

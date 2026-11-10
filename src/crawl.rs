@@ -16,6 +16,7 @@ use crate::client::{Client, ClientError, FetchResult, Outcome};
 use crate::naming::{output_filename, sanitized_name, write_unique};
 use crate::proxy::response::html_escape;
 use crate::robots::Robots;
+use crate::util::LockExt;
 
 /// Deepest `--crawl-depth`.
 pub const MAX_DEPTH: u8 = 5;
@@ -231,12 +232,12 @@ pub async fn crawl(
                 .get(&u.origin().ascii_serialization())
                 .is_some_and(|r| !r.allowed(&agent, &robots_path(u)));
             if disallowed {
-                *robots_refused.lock().unwrap_or_else(|e| e.into_inner()) = Some(u.to_string());
+                *robots_refused.lock_or_recover() = Some(u.to_string());
             }
             !disallowed
         };
         let (outcome, attempts) = client.get_within(&url, &[], &page_scope).await;
-        let refused = robots_refused.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let refused = robots_refused.lock_or_recover().take();
         if let (Err(_), Some(target)) = (&outcome, refused) {
             report.skipped.push((target, "robots.txt".into()));
             continue;
@@ -263,7 +264,7 @@ pub async fn crawl(
                 let media = headers
                     .get(hyper::header::CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
-                    .map(|c| c.split(';').next().unwrap_or("").trim().to_ascii_lowercase());
+                    .map(|c| crate::util::media_type(c).to_ascii_lowercase());
                 result.content_type.clone_from(&media);
                 if !(200..300).contains(&status) {
                     result.error = Some(format!("HTTP {status}"));

@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::config::RateConfig;
 use crate::reason::Reason;
+use crate::util::LockExt;
 
 /// Maximum tracked clients (D-51); an evicted idle key restarts with a full bucket.
 pub const MAX_KEYS: usize = 100_000;
@@ -73,7 +74,7 @@ impl Bucket {
 
     /// Take up to `want` bytes; `Err(wait)` when the bucket is empty.
     pub fn take(&self, want: usize, now: Instant) -> Result<usize, Duration> {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock_or_recover();
         let elapsed = now.saturating_duration_since(s.1);
         let refill =
             u64::try_from(elapsed.as_micros().saturating_mul(u128::from(self.rate)) / 1_000_000)
@@ -135,7 +136,7 @@ impl std::fmt::Debug for Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let mut map = self.limiter.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.limiter.map.lock_or_recover();
         if let Some(e) = map.get_mut(&self.key) {
             let c = match self.slot {
                 Slot::Connection => &mut e.connections,
@@ -160,7 +161,7 @@ impl Limiter {
 
     /// Tracked clients (tests, E-57).
     pub fn len(&self) -> usize {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.map.lock_or_recover().len()
     }
 
     /// Whether no client is tracked.
@@ -170,7 +171,7 @@ impl Limiter {
 
     fn with<T>(&self, key: &str, rate: &RateConfig, f: impl FnOnce(&mut Entry, Instant) -> T) -> T {
         let now = self.clock.now();
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.map.lock_or_recover();
         if !map.contains_key(key) && map.len() >= self.max_keys {
             // Evict the least recently seen idle 1 % (amortized); busy entries are kept.
             let mut idle: Vec<(Instant, String)> = map

@@ -1308,10 +1308,7 @@ impl Config {
     fn validate_plugins(&self) -> Result<(), ConfigError> {
         let mut names = std::collections::HashSet::new();
         for p in &self.plugins {
-            let name_ok = (1..=32).contains(&p.name.len())
-                && p.name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b));
+            let name_ok = crate::util::valid_name(&p.name);
             if !name_ok || !names.insert(p.name.as_str()) {
                 return Err(invalid("plugins.name", "unique, [a-z0-9_-]{1,32}"));
             }
@@ -1339,10 +1336,7 @@ impl Config {
         let mut names = std::collections::HashSet::new();
         let mut total = 0usize;
         for f in &self.feeds {
-            let name_ok = (1..=32).contains(&f.name.len())
-                && f.name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b));
+            let name_ok = crate::util::valid_name(&f.name);
             if !name_ok || !names.insert(f.name.as_str()) {
                 return Err(invalid(
                     "feeds.name",
@@ -1440,10 +1434,7 @@ impl Config {
             .map_err(|e| invalid("blocklists.utc_offset", e))?;
         let mut names = std::collections::HashSet::new();
         for cat in &self.blocklists.categories {
-            let name_ok = (1..=32).contains(&cat.name.len())
-                && cat.name.bytes().all(|b| {
-                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
-                });
+            let name_ok = crate::util::valid_name(&cat.name);
             if !name_ok || !names.insert(cat.name.as_str()) {
                 return Err(invalid(
                     KEY,

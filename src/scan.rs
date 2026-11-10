@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{ClamdConfig, ScanConfig};
+use crate::util::LockExt;
 
 /// Temp file prefix (startup cleanup removes leftovers).
 const TEMP_PREFIX: &str = "wfscan-";
@@ -215,7 +216,7 @@ impl HashList {
             return false;
         }
         let stamp = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock_or_recover();
         if s.0 != stamp {
             let mut set = HashSet::new();
             if let Ok(text) = std::fs::read_to_string(&self.path) {
@@ -317,8 +318,7 @@ impl Scanner {
             || d.dispositions.iter().flat_map(|cd| disposition_filenames(cd)).any(|(star, v)| {
                 self.eligible_name(&v) || (star && self.eligible_name(&percent_decode(&v)))
             });
-        let media =
-            d.content_type.map(|c| c.split(';').next().unwrap_or("").trim().to_ascii_lowercase());
+        let media = d.content_type.map(|c| crate::util::media_type(c).to_ascii_lowercase());
         let ctype = media
             .as_deref()
             .is_some_and(|m| self.cfg.content_types.iter().any(|c| c.eq_ignore_ascii_case(m)));

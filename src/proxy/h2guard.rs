@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Notify;
 
 use crate::config::Http2Config;
+use crate::util::LockExt;
 
 /// The client connection preface (RFC 9113 3.4).
 pub const PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -305,7 +306,7 @@ impl Default for GuardState {
 impl GuardState {
     /// Record a violation (first one wins) and wake the connection driver.
     pub fn trip(&self, v: Violation) {
-        let mut t = self.tripped.lock().unwrap_or_else(|e| e.into_inner());
+        let mut t = self.tripped.lock_or_recover();
         if t.is_none() {
             *t = Some(v);
         }
@@ -315,7 +316,7 @@ impl GuardState {
 
     /// The violation, if any.
     pub fn violation(&self) -> Option<Violation> {
-        *self.tripped.lock().unwrap_or_else(|e| e.into_inner())
+        *self.tripped.lock_or_recover()
     }
 
     /// Wait until the guard trips.

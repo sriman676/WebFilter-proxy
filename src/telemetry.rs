@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use crate::logger::RequestEvent;
+use crate::util::LockExt;
 
 /// Events kept for `events/recent`.
 pub const RING: usize = 1000;
@@ -113,7 +114,7 @@ impl Default for Telemetry {
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock_or_recover()
 }
 
 impl Telemetry {

@@ -6,13 +6,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::blocklist::{
     BlocklistHandle, ReloadOutcome, parse_domain_entry, parse_domains, parse_ips, parse_patterns,
 };
 use crate::config::BlocklistConfig;
 use crate::profiles::Settings;
+use crate::util::LockExt;
+use crate::util::unix_now;
 
 /// Versions kept per edited item.
 pub const KEEP: usize = 10;
@@ -85,10 +86,6 @@ pub fn validate(kind: Kind, text: &str) -> Result<usize, String> {
     r.map_err(|e| e.to_string())
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 fn versions_dir(state: &Path, item: &str) -> PathBuf {
     state.join("versions").join(item.replace('/', "__"))
 }
@@ -113,7 +110,7 @@ pub fn versions(state: &Path, item: &str) -> Vec<String> {
 static EDIT_LOCK: Mutex<()> = Mutex::new(());
 
 fn edit_lock() -> MutexGuard<'static, ()> {
-    EDIT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    EDIT_LOCK.lock_or_recover()
 }
 
 /// Replace `path` atomically: a randomly named sibling created with `create_new` (never follows

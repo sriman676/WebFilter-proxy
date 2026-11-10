@@ -27,6 +27,7 @@ use tokio::sync::Semaphore;
 use crate::auth::{Lockout, verify_password};
 use crate::proxy::ProxyDeps;
 use crate::telemetry::{header as metric_header, label, render_counters};
+use crate::util::LockExt;
 
 /// Embedded dashboard (D-57): no CDN, no inline script or style.
 const INDEX_HTML: &str = include_str!("../../assets/admin/index.html");
@@ -295,10 +296,7 @@ impl Admin {
         }
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let hit = |cache: &Mutex<Option<[u8; 32]>>| {
-            cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some_and(|d| bool::from(d.ct_eq(&digest)))
+            cache.lock_or_recover().is_some_and(|d| bool::from(d.ct_eq(&digest)))
         };
         if hit(&self.verified) {
             return Ok(false);
@@ -320,7 +318,7 @@ impl Admin {
                 .await
                 .unwrap_or(false);
             if ok {
-                *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(digest);
+                *cache.lock_or_recover() = Some(digest);
                 self.lockout.record_success(ip);
                 return Ok(readonly);
             }
@@ -353,7 +351,7 @@ impl Admin {
     fn metrics(&self) -> Resp {
         let d = &self.deps;
         let mut out = String::new();
-        render_counters(&d.telemetry.counters.lock().unwrap_or_else(|e| e.into_inner()), &mut out);
+        render_counters(&d.telemetry.counters.lock_or_recover(), &mut out);
         metric_header(
             &mut out,
             "webfilter_active_connections",
@@ -457,7 +455,7 @@ impl Admin {
         let num = |k: &str, def: usize| q(qs, k).and_then(|v| v.parse().ok()).unwrap_or(def);
         let v = match api {
             "stats" => {
-                let c = d.telemetry.counters.lock().unwrap_or_else(|e| e.into_inner());
+                let c = d.telemetry.counters.lock_or_recover();
                 let total: u64 = c.requests.values().sum();
                 let blocked: u64 = c.requests.iter().filter(|((a, _, _), _)| a == "blocked").map(|(_, n)| n).sum();
                 let lists = d.lists.snapshot();

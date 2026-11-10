@@ -17,6 +17,7 @@ use regex_automata::util::syntax;
 use crate::config::BlocklistConfig;
 use crate::logger::{SysEvent, SystemLog};
 use crate::normalize::fold_ip;
+use crate::util::LockExt;
 
 /// Maximum list file size.
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
@@ -601,7 +602,7 @@ impl BlocklistHandle {
     pub fn reload(&self) -> ReloadOutcome {
         // Holding the stamp lock for the whole load serializes reloads (SIGHUP vs watcher), so an
         // older load can never overwrite a newer one. A failed load is not retried until changed.
-        let mut stamp = self.stamp.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stamp = self.stamp.lock_or_recover();
         *stamp = Self::stamp_of(&self.cfg);
         match Blocklists::load(&self.config()) {
             Ok((lists, report)) => {
@@ -614,8 +615,7 @@ impl BlocklistHandle {
 
     /// Reload only if any file's size or mtime changed.
     pub fn reload_if_changed(&self) -> Option<ReloadOutcome> {
-        let changed =
-            *self.stamp.lock().unwrap_or_else(|e| e.into_inner()) != Self::stamp_of(&self.cfg);
+        let changed = *self.stamp.lock_or_recover() != Self::stamp_of(&self.cfg);
         changed.then(|| self.reload())
     }
 
