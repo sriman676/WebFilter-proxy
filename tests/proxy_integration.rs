@@ -668,3 +668,58 @@ async fn i19_graceful_shutdown_finishes_in_flight() {
     );
     assert!(p.system_lines().iter().any(|v| v["kind"] == "proxy_stop"));
 }
+
+fn basic(user_pass: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(user_pass)
+}
+
+/// RV3-M4 / RV3-M3: malformed credentials and over-long user names cost no argon2 run and are
+/// never counted, so they cannot lock anyone out or fill the lockout tables.
+#[tokio::test]
+async fn rv3_m4_malformed_and_oversized_credentials_are_not_counted() {
+    let hash = webfilter::auth::hash_password(b"pw").unwrap();
+    let origin = Origin::start(|_| Reply::ok("ok")).await;
+    let mut p =
+        proxy(&format!("[proxy_auth]\nusername = \"u\"\npassword_hash = \"{hash}\"\n"), &[]).await;
+    let port = origin.addr.port();
+    let with = |cred: &str| {
+        format!(
+            "GET http://good.test:{port}/ HTTP/1.1\r\nHost: good.test:{port}\r\nProxy-Authorization: Basic {cred}\r\nConnection: close\r\n\r\n"
+        )
+    };
+    let no_colon = basic("no-colon-here");
+    let long_name = basic(&format!("{}:pw", "x".repeat(200)));
+    let creds = ["%%%not-base64", no_colon.as_str(), long_name.as_str()];
+    for i in 0..15 {
+        let resp = p.raw(with(creds[i % creds.len()]).as_bytes(), W).await;
+        assert_eq!(status(&resp), 407, "attempt {i}: {resp}");
+    }
+    assert_eq!(status(&p.raw(with("dTpwdw==").as_bytes(), W).await), 200, "never locked out");
+    p.stop().await;
+    assert!(!p.system_lines().iter().any(|v| v["kind"] == "auth_lockout"));
+}
+
+/// RV3-L4: the `auth_lockout` event caps the attacker-supplied user name at 64 characters.
+#[tokio::test]
+async fn rv3_l4_lockout_event_caps_the_user_name() {
+    let hash = webfilter::auth::hash_password(b"pw").unwrap();
+    let name = "a".repeat(100);
+    let mut p = proxy(
+        &format!("[proxy_auth]\nusername = \"{name}\"\npassword_hash = \"{hash}\"\n"),
+        &[],
+    )
+    .await;
+    let cred = basic(&format!("{name}:wrong"));
+    let req = format!(
+        "GET http://good.test:1/ HTTP/1.1\r\nHost: good.test:1\r\nProxy-Authorization: Basic {cred}\r\nConnection: close\r\n\r\n"
+    );
+    for _ in 0..5 {
+        assert_eq!(status(&p.raw(req.as_bytes(), W).await), 407);
+    }
+    p.stop().await;
+    let lockout = p.system_lines().into_iter().find(|v| v["kind"] == "auth_lockout").unwrap();
+    let user = lockout["detail"]["user"].as_str().unwrap().to_owned();
+    assert!(user.chars().count() <= 64, "capped: {user}");
+    assert!(user.starts_with("aaaa"), "{user}");
+}
