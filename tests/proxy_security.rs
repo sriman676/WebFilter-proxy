@@ -286,3 +286,88 @@ async fn e24_sigterm_drains_in_flight_and_exits_zero() {
     let log = std::fs::read_to_string(lab.path().join("logs/webfilter.jsonl")).unwrap();
     assert!(log.contains("\"status\":200"), "request logged and flushed");
 }
+
+/// Review 2 M2: a Content-Type the browser could read differently (duplicate headers, a
+/// comma list) is an ambiguous upstream response: 502, never forwarded.
+#[tokio::test]
+async fn rv2_m2_ambiguous_content_type_rejected() {
+    let mut p = ProxyHarness::start(
+        &base_config(""),
+        &[],
+        TestResolver::with(&[("good.test", "127.0.0.1")]),
+    )
+    .await;
+    for (ct, want) in [
+        (
+            "content-type: application/x-msdownload\r\ncontent-type: application/x-msdownload\r\n",
+            502,
+        ),
+        ("content-type: text/html\r\ncontent-type: text/html\r\n", 502),
+        ("content-type: text/plain, application/x-msdownload\r\n", 502),
+        ("content-type: text/plain; charset=utf-8, application/x-msdownload\r\n", 502),
+        ("content-type: application/x-msdownload\r\n", 403),
+        ("content-type: text/html; charset=\"a,b\"\r\n", 200),
+        ("content-type: text/html\r\n", 200),
+    ] {
+        let origin = Origin::start(move |_| {
+            Reply::raw(format!("HTTP/1.1 200 OK\r\n{ct}content-length: 4\r\n\r\nBODY"))
+        })
+        .await;
+        let resp = p.get("good.test", origin.addr.port(), "/").await;
+        assert_eq!(status(&resp), want, "{ct}: {resp}");
+        if want == 502 {
+            assert_eq!(common::reason(&resp), "upstream_error", "{ct}");
+        }
+        assert_eq!(resp.ends_with("BODY"), want == 200, "{ct}: {resp}");
+    }
+    p.stop().await;
+}
+
+/// Review 2 L4: the admin listener is one of the proxy's own addresses (loop, 508).
+#[tokio::test]
+async fn rv2_l4_requests_to_the_admin_listener_are_loops() {
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let cfg = base_config(&format!(
+        "[admin]\nenabled = true\nlisten = \"{free}\"\ntoken_hash = \"{}\"\n",
+        common::admin_token_hash()
+    ));
+    let mut p = ProxyHarness::start(&cfg, &[], TestResolver::with(&[])).await;
+    assert_eq!(p.handle.as_ref().unwrap().admin_addr, Some(free));
+    let resp = p.raw(format!("GET http://{free}/ HTTP/1.1\r\n\r\n").as_bytes(), W).await;
+    assert_eq!(status(&resp), 508, "{resp}");
+    let port = free.port();
+    let resp = p.raw(format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n").as_bytes(), W).await;
+    assert_eq!(status(&resp), 508, "{resp}");
+    p.stop().await;
+}
+
+/// Review 2 L1: a 101 to a websocket request opens the relay only with `Upgrade: websocket`.
+#[tokio::test]
+async fn rv2_l1_non_websocket_101_rejected() {
+    let mut p = ProxyHarness::start(
+        &base_config(""),
+        &[],
+        TestResolver::with(&[("good.test", "127.0.0.1")]),
+    )
+    .await;
+    for upgrade in ["", "upgrade: h2c\r\n", "upgrade: websocket, h2c\r\n"] {
+        let origin = Origin::start(move |_| Reply {
+            echo: true,
+            ..Reply::raw(format!(
+                "HTTP/1.1 101 Switching Protocols\r\n{upgrade}connection: Upgrade\r\nsec-websocket-accept: x\r\n\r\n"
+            ))
+        })
+        .await;
+        let port = origin.addr.port();
+        let req = format!(
+            "GET http://good.test:{port}/ws HTTP/1.1\r\nHost: good.test:{port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\nFRAME-BYTES"
+        );
+        let resp = p.raw(req.as_bytes(), W).await;
+        assert_eq!(status(&resp), 502, "{upgrade:?}: {resp}");
+        assert!(
+            !resp.contains("FRAME-BYTES") && !resp.contains("Switching"),
+            "{upgrade:?}: {resp}"
+        );
+    }
+    p.stop().await;
+}

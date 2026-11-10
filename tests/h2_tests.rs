@@ -71,8 +71,15 @@ async fn serve_h2<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(tls: 
             while let Some(Ok(c)) = body.data().await {
                 let _ = body.flow_control().release_capacity(c.len());
             }
-            let ctype = if path == "/exe" { "application/x-msdownload" } else { "text/html" };
+            let ctype = match path.as_str() {
+                "/exe" | "/ct-dup" => "application/x-msdownload",
+                "/ct-list" => "text/plain, application/x-msdownload",
+                _ => "text/html",
+            };
             let mut resp = Response::builder().status(200).header("content-type", ctype);
+            if path == "/ct-dup" {
+                resp = resp.header("content-type", ctype); // review 2 M2: two headers
+            }
             if path == "/forge" {
                 resp = resp.header("x-webfilter-action", "blocked");
             }
@@ -650,4 +657,24 @@ fn scanner_counts_split_frames_and_never_panics() {
     let junk: Vec<u8> =
         (0..10_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
     let _ = s.feed(&junk, now);
+}
+
+/// Review 2 M2 over h2: duplicate Content-Type headers or a comma list are ambiguous (502,
+/// body never forwarded); a single header still works.
+#[tokio::test]
+async fn rv2_m2_h2_ambiguous_content_type_rejected() {
+    let mut l =
+        lab("[rules]\nblocked_content_types = [\"application/x-msdownload\"]\n", &[], BOTH).await;
+    let send = h2_client(&l, None).await;
+    for path in ["/ct-dup", "/ct-list"] {
+        let (st, h, body) = fetch(&send, get(l.origin.port, path)).await.unwrap();
+        assert_eq!((st, h["x-webfilter-reason"].to_str().unwrap()), (502, "upstream_error"));
+        assert!(!body.starts_with(b"hello"), "{path}: the origin body is never forwarded");
+    }
+    let (st, _, body) = fetch(&send, get(l.origin.port, "/page")).await.unwrap();
+    assert_eq!((st, body.as_slice()), (200, &b"hello /page"[..]));
+    let (st, _, _) = fetch(&send, get(l.origin.port, "/exe")).await.unwrap();
+    assert_eq!(st, 403, "a single blocked type is still blocked");
+    drop(send);
+    l.proxy.stop().await;
 }

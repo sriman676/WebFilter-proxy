@@ -484,6 +484,11 @@ pub async fn start_with(
     };
     let mut own = vec![local_addr];
     own.extend(transparent_addrs.iter().flat_map(|(h, t)| [*h, *t]));
+    // The admin listener is the proxy too (review 2 L4); it binds later, so its configured
+    // address is used (an ephemeral port 0 is unknown here and never a valid destination).
+    if cfg.admin.enabled && cfg.admin.listen.port() != 0 {
+        own.push(cfg.admin.listen);
+    }
     let resolver = resolver.or_else(crate::policy::test_hosts_resolver);
     let (tx, rx) = watch::channel(false);
     let (access, access_warning) =

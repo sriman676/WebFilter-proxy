@@ -430,3 +430,79 @@ async fn proxy_refuses_start_with_loose_ca_key() {
     let err = webfilter::proxy::start(cfg, None).await.err().expect("must refuse to start");
     assert!(err.to_string().contains("0600"), "{err}");
 }
+
+/// CONNECT `authority`, read the 200, send `hello`; returns what the proxy sends afterwards
+/// (until it closes or `W` passes).
+async fn passthrough_hello(proxy: SocketAddr, authority: &str, hello: &[u8]) -> Vec<u8> {
+    let mut s = tokio::net::TcpStream::connect(proxy).await.unwrap();
+    s.write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut b = [0u8; 1];
+        assert_ne!(s.read(&mut b).await.unwrap(), 0, "proxy closed during CONNECT");
+        head.push(b[0]);
+    }
+    assert!(head.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&head));
+    s.write_all(hello).await.unwrap();
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(W, s.read_to_end(&mut out)).await;
+    out
+}
+
+/// Review 2 M3 (D-22): passthrough tunnels compare the ClientHello SNI with the CONNECT host,
+/// both for a passthrough domain (interception on) and with interception off.
+#[tokio::test]
+async fn rv2_m3_passthrough_sni_mismatch_blocked() {
+    let mut lab = intercepting("", &[]).await;
+    let origin =
+        Origin::start_tls(lab.pki.leaf(&["pass.test"], false), |_| Reply::ok("direct")).await;
+    let port = origin.addr.port();
+    let hello = synthetic_hello(&[sni_ext("blocked.test")]);
+    let out = passthrough_hello(lab.proxy.addr, &format!("pass.test:{port}"), &hello).await;
+    assert!(out.is_empty(), "closed without relaying: {}", String::from_utf8_lossy(&out));
+    // Matching SNI (CONNECT host in another case) still tunnels end-to-end.
+    let mut t = tunnel(lab.proxy.addr, &format!("PASS.test:{port}"), "pass.test", &lab.pki.ca_pem)
+        .await
+        .unwrap();
+    let resp = exchange(
+        &mut t,
+        &format!("GET / HTTP/1.1\r\nHost: pass.test:{port}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert!(resp.ends_with("direct"), "{resp}");
+    drop(t);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    lab.proxy.stop().await;
+    let logs = lab.proxy.log_lines();
+    assert!(
+        logs.iter().any(|l| l["reason"] == "sni_mismatch"
+            && l["action"] == "blocked"
+            && l["tls_sni"] == "blocked.test"),
+        "{logs:?}"
+    );
+
+    // Interception off: the same rule.
+    let pki = TestPki::new();
+    let origin =
+        Origin::start_tls(pki.leaf(&["good.test"], false), |_| Reply::ok("plain-pt")).await;
+    let port = origin.addr.port();
+    let resolver = TestResolver::with(&[("good.test", "127.0.0.1")]);
+    let mut p = ProxyHarness::start(&base_config(""), &[], resolver).await;
+    let out = passthrough_hello(p.addr, &format!("good.test:{port}"), &hello).await;
+    assert!(out.is_empty(), "closed without relaying: {}", String::from_utf8_lossy(&out));
+    let mut t =
+        tunnel(p.addr, &format!("good.test:{port}"), "good.test", &pki.ca_pem).await.unwrap();
+    let resp = exchange(
+        &mut t,
+        &format!("GET / HTTP/1.1\r\nHost: good.test:{port}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert!(resp.ends_with("plain-pt"), "{resp}");
+    drop(t);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    p.stop().await;
+    assert!(p.log_lines().iter().any(|l| l["reason"] == "sni_mismatch"));
+    assert_eq!(origin.requests().len(), 1, "only the matching tunnel reached the origin");
+}

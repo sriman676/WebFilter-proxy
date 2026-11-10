@@ -32,6 +32,45 @@ pub fn media_type(content_type: &str) -> &str {
     content_type.split(';').next().unwrap_or("").trim()
 }
 
+/// A response `Content-Type` that browsers could read differently than the proxy (review 2 M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("ambiguous Content-Type")]
+pub struct AmbiguousContentType;
+
+/// The one unambiguous `Content-Type` of a response (D-08): more than one header, or a value
+/// that is a comma-separated list (a comma outside a quoted string), is rejected, because
+/// browsers use the last valid entry while a rule would see another one.
+///
+/// ```
+/// use webfilter::util::content_type;
+/// let one: [&[u8]; 1] = [b"text/html; charset=\"a,b\""];
+/// assert_eq!(content_type(one).unwrap().as_deref(), Some("text/html; charset=\"a,b\""));
+/// assert!(content_type([&b"text/plain, application/x-msdownload"[..]]).is_err());
+/// assert!(content_type([&b"text/plain"[..], &b"text/plain"[..]]).is_err());
+/// assert_eq!(content_type(std::iter::empty::<&[u8]>()), Ok(None));
+/// ```
+pub fn content_type<'a, I>(values: I) -> Result<Option<String>, AmbiguousContentType>
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut it = values.into_iter();
+    let Some(first) = it.next() else { return Ok(None) };
+    if it.next().is_some() {
+        return Err(AmbiguousContentType);
+    }
+    let (mut quoted, mut escaped) = (false, false);
+    for &b in first {
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b',' if !quoted => return Err(AmbiguousContentType),
+            _ => {}
+        }
+    }
+    Ok(Some(String::from_utf8_lossy(first).into_owned()))
+}
+
 /// Names of profiles, feeds, categories and plugins: `[a-z0-9_-]{1,32}`.
 pub fn valid_name(name: &str) -> bool {
     (1..=32).contains(&name.len())
