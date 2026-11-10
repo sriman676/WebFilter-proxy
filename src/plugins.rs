@@ -95,6 +95,7 @@ mod imp {
 
     use super::{Counters, MAX_MODULE_BYTES, Outcome, PluginConfig};
     use crate::config::PluginOnError;
+    use crate::util::LockExt;
 
     struct State {
         limits: StoreLimits,
@@ -193,7 +194,7 @@ mod imp {
             self.counters.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let now = Instant::now();
             let log = {
-                let mut last = self.last_log.lock().unwrap_or_else(|e| e.into_inner());
+                let mut last = self.last_log.lock_or_recover();
                 let due = last.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(60));
                 if due {
                     *last = Some(now);

@@ -399,8 +399,7 @@ async fn exchange(
         .headers
         .get(http::header::CONTENT_TYPE)
         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
-    ev.http_content_type =
-        content_type.as_deref().map(|c| c.split(';').next().unwrap_or("").trim().to_owned());
+    ev.http_content_type = content_type.as_deref().map(|c| crate::util::media_type(c).to_owned());
     let phase = Phase::ResponseHeaders { content_type: content_type.as_deref() };
     let d = deps.evaluate(&t, phase, profile, &c.tunnel.client_id);
     if d.reason != Reason::None {

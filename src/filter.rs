@@ -170,7 +170,7 @@ pub fn evaluate_at(
             }
         }
         Phase::ResponseHeaders { content_type: Some(ct) } => {
-            let media = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            let media = crate::util::media_type(ct).to_ascii_lowercase();
             if rules.blocked_content_types.iter().any(|b| b.eq_ignore_ascii_case(&media)) {
                 return block(Reason::ContentType, format!("ctype:{media}"));
             }

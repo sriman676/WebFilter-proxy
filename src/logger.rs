@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use crate::config::LoggingConfig;
 use crate::filter::Action;
+use crate::util::LockExt;
 
 /// Request log file name.
 pub const REQUEST_FILE: &str = "webfilter.jsonl";
@@ -416,7 +417,7 @@ impl EventLogger {
             }
         }
         if ack_rx.recv_timeout(end.saturating_duration_since(Instant::now())).is_ok()
-            && let Some(t) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take()
+            && let Some(t) = self.thread.lock_or_recover().take()
         {
             let _ = t.join();
         }
@@ -657,7 +658,7 @@ impl Stats {
         }
         self.blocked.fetch_add(1, Ordering::Relaxed);
         let host = clean(host, 253);
-        let mut top = self.top.lock().unwrap_or_else(|e| e.into_inner());
+        let mut top = self.top.lock_or_recover();
         if let Some(n) = top.get_mut(&host) {
             *n += 1;
         } else if top.len() < MAX_TRACKED_HOSTS {
@@ -673,7 +674,7 @@ impl Stats {
     /// Count a limit rejection for `profile` (SPEC_EXT_POLICY P2; profiles are bounded, <= 100).
     pub fn record_limit(&self, profile: &str, reason: crate::reason::Reason) {
         use crate::reason::Reason as R;
-        let mut map = self.limits.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.limits.lock_or_recover();
         if map.len() >= 128 && !map.contains_key(profile) {
             return;
         }
@@ -693,11 +694,10 @@ impl Stats {
     /// Build the window summary and reset the window counters.
     pub fn take_window(&self, window_secs: u64, dropped: u64, lists: ListCounts) -> StatsEvent {
         let take = |a: &AtomicU64| a.swap(0, Ordering::Relaxed);
-        let mut top: Vec<HostCount> =
-            std::mem::take(&mut *self.top.lock().unwrap_or_else(|e| e.into_inner()))
-                .into_iter()
-                .map(|(host, count)| HostCount { host, count })
-                .collect();
+        let mut top: Vec<HostCount> = std::mem::take(&mut *self.top.lock_or_recover())
+            .into_iter()
+            .map(|(host, count)| HostCount { host, count })
+            .collect();
         top.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.host.cmp(&b.host)));
         top.truncate(TOP_BLOCKED);
         StatsEvent {
@@ -713,7 +713,7 @@ impl Stats {
             active_connections: self.active_connections.load(Ordering::Relaxed),
             dropped_log_events: dropped,
             h2_flood: take(&self.h2_flood),
-            limits: std::mem::take(&mut *self.limits.lock().unwrap_or_else(|e| e.into_inner())),
+            limits: std::mem::take(&mut *self.limits.lock_or_recover()),
             top_blocked: top,
             lists,
         }

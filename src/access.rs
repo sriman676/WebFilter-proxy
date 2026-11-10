@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,8 @@ use sha2::Sha256;
 
 use crate::normalize::NormalizedTarget;
 use crate::reason::Reason;
+use crate::util::LockExt;
+use crate::util::unix_now;
 
 /// CSRF token lifetime.
 pub const CSRF_TTL: Duration = Duration::from_secs(15 * 60);
@@ -75,10 +77,6 @@ pub fn eligible(reason: Reason) -> bool {
         reason,
         Reason::DomainBlocklist | Reason::UrlPattern | Reason::Extension | Reason::ContentType
     )
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// HMAC-SHA256 CSRF tokens bound to (event_id, client_id, expiry); 128-bit truncated.
@@ -148,7 +146,7 @@ impl RecentBlocks {
         if !eligible(reason) {
             return;
         }
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.map.lock_or_recover();
         if map.len() >= RECENT_CLIENTS && !map.contains_key(client) {
             map.retain(|_, q| q.back().is_some_and(|b| b.at.elapsed() < CSRF_TTL));
             if map.len() >= RECENT_CLIENTS {
@@ -170,7 +168,7 @@ impl RecentBlocks {
 
     /// The client's own recent block for `event_id`.
     pub fn find(&self, client: &str, event_id: &str) -> Option<RecentBlock> {
-        let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self.map.lock_or_recover();
         map.get(client)?
             .iter()
             .find(|b| b.event_id == event_id && b.at.elapsed() < CSRF_TTL)
@@ -342,7 +340,7 @@ impl AccessState {
             hourly: Mutex::new(HashMap::new()),
         };
         if pruned {
-            let all = me.requests.lock().unwrap_or_else(|e| e.into_inner());
+            let all = me.requests.lock_or_recover();
             let _ = me.persist_requests(&all);
         }
         (me, warning)
@@ -384,7 +382,7 @@ impl AccessState {
         }
         let busy = |m| Refused { status: 429, message: m };
         // Lock order everywhere: hourly, then requests, then allows.
-        let mut hourly = self.hourly.lock().unwrap_or_else(|e| e.into_inner());
+        let mut hourly = self.hourly.lock_or_recover();
         if hourly.len() >= HOURLY_CLIENTS && !hourly.contains_key(client) {
             prune_hourly(&mut hourly);
             if hourly.len() >= HOURLY_CLIENTS {
@@ -396,7 +394,7 @@ impl AccessState {
         if q.len() >= per_hour as usize {
             return Err(busy("too many requests this hour"));
         }
-        let mut all = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.requests.lock_or_recover();
         let pending = all.iter().filter(|r| r.client_id == client && r.status == "pending").count();
         if pending >= max_pending as usize {
             return Err(busy("too many pending requests"));
@@ -440,8 +438,7 @@ impl AccessState {
     /// Requests, optionally by status.
     pub fn requests(&self, status: Option<&str>) -> Vec<AccessRequest> {
         self.requests
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_or_recover()
             .iter()
             .filter(|r| status.is_none_or(|s| r.status == s))
             .cloned()
@@ -450,7 +447,7 @@ impl AccessState {
 
     /// One request.
     pub fn request(&self, id: &str) -> Option<AccessRequest> {
-        self.requests.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|r| r.id == id).cloned()
+        self.requests.lock_or_recover().iter().find(|r| r.id == id).cloned()
     }
 
     /// Approve (creating a temp allow) or deny a pending request.
@@ -464,7 +461,7 @@ impl AccessState {
     ) -> Result<(AccessRequest, Option<TempAllow>), &'static str> {
         // Both records change under the requests lock: an approval whose temp allow cannot be
         // created (invalid host, cap, I/O) leaves the request pending (review L3).
-        let mut all = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.requests.lock_or_recover();
         let r = all.iter_mut().find(|r| r.id == id).ok_or("unknown request")?;
         if r.status != "pending" {
             return Err("request already decided");
@@ -514,7 +511,7 @@ impl AccessState {
             expires: unix_now() + ttl,
             created_by: actor.to_owned(),
         };
-        let mut all = self.allows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.allows.lock_or_recover();
         if all.len() >= MAX_ALLOWS {
             return Err("too many temp allows");
         }
@@ -528,7 +525,7 @@ impl AccessState {
 
     /// Remove a temp allow.
     pub fn remove_allow(&self, id: &str) -> bool {
-        let mut all = self.allows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.allows.lock_or_recover();
         let before = all.len();
         all.retain(|a| a.id != id);
         let removed = all.len() != before;
@@ -541,27 +538,21 @@ impl AccessState {
     /// Current (unexpired) temp allows.
     pub fn allows(&self) -> Vec<TempAllow> {
         let now = unix_now();
-        self.allows
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter(|a| a.expires > now)
-            .cloned()
-            .collect()
+        self.allows.lock_or_recover().iter().filter(|a| a.expires > now).cloned().collect()
     }
 
     /// Drop expired allows; returns them (for `temp_allow_expired` events). Also applies request
     /// retention and forgets expired per-client hourly windows.
     pub fn sweep(&self) -> Vec<TempAllow> {
         let now = unix_now();
-        prune_hourly(&mut self.hourly.lock().unwrap_or_else(|e| e.into_inner()));
+        prune_hourly(&mut self.hourly.lock_or_recover());
         {
-            let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+            let mut requests = self.requests.lock_or_recover();
             if retain_requests(&mut requests, now, MAX_REQUESTS) {
                 let _ = self.persist_requests(&requests);
             }
         }
-        let mut all = self.allows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.allows.lock_or_recover();
         let (gone, keep): (Vec<_>, Vec<_>) = all.drain(..).partition(|a| a.expires <= now);
         *all = keep;
         if !gone.is_empty() {
@@ -574,7 +565,7 @@ impl AccessState {
     pub fn matches(&self, client: &str, profile: &str, t: &NormalizedTarget) -> Option<String> {
         let host = t.host.domain()?.trim_end_matches('.');
         let now = unix_now();
-        self.allows.lock().unwrap_or_else(|e| e.into_inner()).iter().find_map(|a| {
+        self.allows.lock_or_recover().iter().find_map(|a| {
             let scope_ok = match &a.scope {
                 Scope::Client(c) => c == client,
                 Scope::Profile(p) => p == profile,
@@ -587,7 +578,7 @@ impl AccessState {
 
     /// Pending/approved/denied counts (metrics).
     pub fn counts(&self) -> [(&'static str, usize); 3] {
-        let all = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        let all = self.requests.lock_or_recover();
         let n = |s: &str| all.iter().filter(|r| r.status == s).count();
         [("pending", n("pending")), ("approved", n("approved")), ("denied", n("denied"))]
     }

@@ -39,6 +39,7 @@ use crate::normalize::{NormalizedTarget, fold_ip};
 use crate::policy::{DestPolicy, Resolver, SystemResolver};
 use crate::profiles::{PolicySet, Profile};
 use crate::reason::Reason;
+use crate::util::LockExt;
 use http1::{Limits, RequestHead, single};
 use pipeline::{Fail, fail};
 use response::{BlockPage, error_page};
@@ -107,7 +108,7 @@ impl ProxyAuth {
         let phc = known.map_or(self.dummy_phc.as_str(), |u| u.phc.as_str());
         let key: [u8; 32] = Sha256::digest(format!("{user}\0{password}\0{phc}").as_bytes()).into();
         let cached = known.is_some() && {
-            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = self.cache.lock_or_recover();
             cache.iter().any(|(k, at)| bool::from(k.ct_eq(&key)) && at.elapsed() < AUTH_CACHE_TTL)
         };
         let ok = cached || {
@@ -127,7 +128,7 @@ impl ProxyAuth {
             return Err(fail(407, Reason::AuthFailed, "invalid proxy credentials"));
         }
         if !cached {
-            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = self.cache.lock_or_recover();
             if cache.len() >= AUTH_CACHE_MAX {
                 cache.clear();
             }
@@ -160,7 +161,7 @@ struct ConnGuard {
 impl Drop for ConnGuard {
     fn drop(&mut self) {
         self.deps.stats.active_connections.fetch_sub(1, Ordering::Relaxed);
-        let mut map = self.deps.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.deps.per_ip.lock_or_recover();
         if let Some(n) = map.get_mut(&self.ip) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -390,7 +391,7 @@ impl ProxyDeps {
 
     fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnGuard> {
         let ip = fold_ip(ip);
-        let mut map = self.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.per_ip.lock_or_recover();
         let total = self.stats.active_connections.load(Ordering::Relaxed);
         let per_ip = map.get(&ip).copied().unwrap_or(0);
         if total >= self.cfg.limits.max_connections as u64

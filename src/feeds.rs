@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -27,6 +27,8 @@ use crate::logger::{SysEvent, SystemLog};
 use crate::normalize::{NormalizedTarget, TargetContext, canonicalize, fold_ip};
 use crate::policy::{DestPolicy, Resolver, is_private};
 use crate::reason::Reason;
+use crate::util::LockExt;
+use crate::util::unix_now;
 
 /// Kept versions per feed.
 pub const KEEP_VERSIONS: usize = 5;
@@ -302,10 +304,6 @@ impl FeedSet {
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 fn store_err(e: std::io::Error) -> FeedError {
@@ -640,13 +638,13 @@ impl FeedManager {
     }
 
     fn count(&self, name: &str, result: &'static str) {
-        let mut u = self.updates.lock().unwrap_or_else(|e| e.into_inner());
+        let mut u = self.updates.lock_or_recover();
         *u.entry((name.to_owned(), result)).or_default() += 1;
     }
 
     /// Update attempts per (feed, result) for `/metrics`.
     pub fn update_counts(&self) -> Vec<((String, &'static str), u64)> {
-        let u = self.updates.lock().unwrap_or_else(|e| e.into_inner());
+        let u = self.updates.lock_or_recover();
         u.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 

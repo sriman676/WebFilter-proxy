@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::util::LockExt;
 use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
@@ -93,7 +94,7 @@ impl<K: LockKey> Lockout<K> {
     /// Whether `ip` is locked out. When the table is full of active lockouts, unknown clients
     /// are treated as locked (fail closed).
     pub fn is_locked(&self, k: K, now: Instant) -> bool {
-        let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self.map.lock_or_recover();
         match map.get(&k.lock_key()) {
             Some(e) => e.locked_until.is_some_and(|until| now < until),
             None => map.len() >= MAX_TRACKED && Self::active(&map, now) >= MAX_TRACKED,
@@ -103,7 +104,7 @@ impl<K: LockKey> Lockout<K> {
     /// Record a failed attempt; returns true when this failure starts a lockout.
     pub fn record_failure(&self, k: K, now: Instant) -> bool {
         let ip = k.lock_key();
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.map.lock_or_recover();
         if map.len() >= MAX_TRACKED && !map.contains_key(&ip) {
             map.retain(|_, e| e.locked_until.is_some_and(|u| now < u)); // drop expired/partial counters
             if map.len() >= MAX_TRACKED {
@@ -124,6 +125,6 @@ impl<K: LockKey> Lockout<K> {
 
     /// Clear the counter after a successful login.
     pub fn record_success(&self, k: K) {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&k.lock_key());
+        self.map.lock_or_recover().remove(&k.lock_key());
     }
 }

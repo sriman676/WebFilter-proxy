@@ -131,10 +131,7 @@ impl PolicySet {
     pub fn build(cfg: &Config) -> Result<Self, String> {
         let mut profiles = HashMap::new();
         for p in &cfg.profiles {
-            let name_ok = (1..=32).contains(&p.name.len())
-                && p.name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b));
+            let name_ok = crate::util::valid_name(&p.name);
             if !name_ok {
                 return Err(format!("profile name {:?}: use [a-z0-9_-], 1-32 chars", p.name));
             }
