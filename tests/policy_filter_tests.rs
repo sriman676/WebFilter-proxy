@@ -347,3 +347,19 @@ async fn static_resolver_parses_spec_and_is_off_without_env() {
         assert!(test_hosts_resolver().is_none());
     }
 }
+
+/// Review 2 L4: the deprecated site-local range is private. Documentation ranges (TEST-NETs,
+/// 2001:db8::/32) are not internal networks and the netns lab uses them as origins (A-49).
+#[test]
+fn rv2_l4_site_local_is_private() {
+    use webfilter::policy::is_private;
+    let p = DestPolicy::new(true, vec![]);
+    for a in ["fec0::1", "feff:ffff::1", "::ffff:10.0.0.1"] {
+        assert!(is_private(ip(a)), "{a}");
+        assert_eq!(p.check_ip(ip(a), 80), Err(Reason::PrivateRange), "{a}");
+    }
+    for a in ["2001:db8::1", "192.0.2.1", "2001:4860::8888", "ff00::1"] {
+        let public = a != "ff00::1";
+        assert_eq!(!is_private(ip(a)), public, "{a}");
+    }
+}
