@@ -115,6 +115,9 @@ pentest-p14:
 # Consolidated final pentest (A-29): all phase suites.
 pentest-all:
     scripts/pentest_all.sh
+# Whole-codebase pentest in one run (A-50).
+pentest-full:
+    scripts/pentest_full.sh
 
 # --- end-to-end and external suites (later phases) --------------------------------------
 # Offline end-to-end suites that drive the real proxy/client (E-xx; E-28/E-41/E-44..50 have own recipes).
