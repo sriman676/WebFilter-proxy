@@ -418,3 +418,69 @@ fn config_requires_acknowledgement_and_distinct_listeners() {
         .to_string();
     assert!(err.contains("must differ"), "{err}");
 }
+
+// ------------------------------------------------------------------------------------ limits (M2)
+
+/// A raw TCP origin: reads the replayed ClientHello, then sends `len` bytes and closes.
+async fn blaster(len: usize) -> SocketAddr {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let mut b = [0u8; 4096];
+                let _ = s.read(&mut b).await;
+                let _ = s.write_all(&vec![b'x'; len]).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    addr
+}
+
+fn limited(rate: &str) -> String {
+    format!(
+        "[[profiles]]\nname = \"tight\"\n[profiles.rate]\n{rate}\n[[clients]]\ncidr = \"127.0.0.1/32\"\nprofile = \"tight\"\n"
+    )
+}
+
+#[tokio::test]
+async fn m2_transparent_tls_applies_request_rate_and_daily_quota() {
+    let hello = synthetic_hello(&[sni_ext("tls.test")]);
+    // Request rate: one token, so the second connection is refused (closed) and logged.
+    let origin = blaster(16).await;
+    let mut t = T::start(&limited("requests_per_sec = 1\nburst = 1"), &[], fixed(origin)).await;
+    let first = raw_exchange(t.tls, &hello, W).await;
+    assert_eq!(first.len(), 16, "first connection relayed");
+    let second = raw_exchange(t.tls, &hello, W).await;
+    assert!(second.is_empty(), "rate limited: closed without relaying");
+    t.stop().await;
+    let lines = t.lines("webfilter.jsonl");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let refused: Vec<&Value> = lines.iter().filter(|v| v["reason"] == "rate_limited").collect();
+    assert_eq!(refused.len(), 1, "{lines:?}");
+    assert_eq!(refused[0]["profile"], "tight");
+    assert_eq!(refused[0]["transparent"], true);
+    // Daily quota: the first relay uses it up; the next connection is refused.
+    let origin = blaster(8192).await;
+    let mut t = T::start(&limited("daily_quota_bytes = 4096"), &[], fixed(origin)).await;
+    assert_eq!(raw_exchange(t.tls, &hello, W).await.len(), 8192);
+    tokio::time::sleep(Duration::from_millis(200)).await; // bytes are counted at finish
+    assert!(raw_exchange(t.tls, &hello, W).await.is_empty(), "quota exceeded: closed");
+    t.stop().await;
+    let lines = t.lines("webfilter.jsonl");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines.iter().filter(|v| v["reason"] == "quota_exceeded").count(), 1, "{lines:?}");
+}
+
+#[tokio::test]
+async fn m2_transparent_tls_bandwidth_cap_paces_the_relay() {
+    let origin = blaster(131_072).await;
+    let mut t = T::start(&limited("down_bytes_per_sec = 65536"), &[], fixed(origin)).await;
+    let started = tokio::time::Instant::now();
+    let out = raw_exchange(t.tls, &synthetic_hello(&[sni_ext("tls.test")]), W).await;
+    let secs = started.elapsed().as_secs_f64();
+    t.stop().await;
+    assert_eq!(out.len(), 131_072, "bytes intact");
+    assert!((1.6..=3.0).contains(&secs), "128 KiB at 64 KiB/s took {secs:.2}s");
+}
