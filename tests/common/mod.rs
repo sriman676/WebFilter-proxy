@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -55,6 +55,49 @@ impl Lab {
 /// Repository root (for shipped config files).
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Parse an IP literal.
+pub fn ip(s: &str) -> IpAddr {
+    s.parse().unwrap()
+}
+
+/// The admin bearer token used by admin-enabled test configs.
+pub const ADMIN_TOKEN: &str = "test-admin-token-0123456789";
+
+/// The argon2id hash of `ADMIN_TOKEN` (computed once per test binary).
+pub fn admin_token_hash() -> &'static str {
+    static H: OnceLock<String> = OnceLock::new();
+    H.get_or_init(|| webfilter::auth::hash_password(ADMIN_TOKEN.as_bytes()).unwrap())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Client
+
+/// Outcome of one `webfilter-client` run.
+pub struct ClientRun {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// `ClientRunner`: run the client binary against `proxy` with `out` as out-dir.
+pub async fn run_client(proxy: SocketAddr, out: &Path, args: &[&str]) -> ClientRun {
+    let o = tokio::process::Command::new(env!("CARGO_BIN_EXE_webfilter-client"))
+        .arg("--proxy")
+        .arg(format!("http://{proxy}"))
+        .arg("--out-dir")
+        .arg(out)
+        .args(args)
+        .env_remove("WEBFILTER_PROXY")
+        .output()
+        .await
+        .unwrap();
+    ClientRun {
+        code: o.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&o.stdout).into(),
+        stderr: String::from_utf8_lossy(&o.stderr).into(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -372,6 +415,14 @@ impl ProxyHarness {
     pub async fn raw(&self, bytes: &[u8], wait: Duration) -> String {
         raw_exchange(self.addr, bytes, wait).await
     }
+
+    /// Absolute-form `GET http://host:port/path` through the proxy (`Connection: close`, 10 s).
+    pub async fn get(&self, host: &str, port: u16, path: &str) -> String {
+        let req = format!(
+            "GET http://{host}:{port}{path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+        );
+        self.raw(req.as_bytes(), Duration::from_secs(10)).await
+    }
 }
 
 /// `RawClient`: write bytes, then read until EOF or timeout.
@@ -386,6 +437,20 @@ pub async fn raw_exchange(addr: SocketAddr, bytes: &[u8], wait: Duration) -> Str
 /// Status code of the first response in `resp`.
 pub fn status(resp: &str) -> u16 {
     resp.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0)
+}
+
+/// Lower-cased `X-WebFilter-Reason` value of `resp` ("" when absent).
+pub fn reason(resp: &str) -> String {
+    resp.lines()
+        .find_map(|l| {
+            l.to_ascii_lowercase().strip_prefix("x-webfilter-reason: ").map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+/// The body of `resp` (everything after the first blank line).
+pub fn body_of(resp: &str) -> &[u8] {
+    resp.split_once("\r\n\r\n").map_or(&[], |(_, b)| b.as_bytes())
 }
 
 // ---------------------------------------------------------------------------------------------

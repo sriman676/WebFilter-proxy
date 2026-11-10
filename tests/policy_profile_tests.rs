@@ -13,7 +13,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, status};
+use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, ip, status};
 use proptest::prelude::*;
 use webfilter::config::{Config, RateConfig};
 use webfilter::limiter::{Bucket, Clock, Limiter};
@@ -29,10 +29,6 @@ fn cfg(extra: &str) -> Config {
         std::fs::write(dir.join("blocklists").join(f), "").unwrap();
     }
     Config::parse(&format!("listen = \"127.0.0.1:0\"\n{extra}"), &dir, None).unwrap()
-}
-
-fn ip(s: &str) -> IpAddr {
-    s.parse().unwrap()
 }
 
 // ------------------------------------------------------------------------------------ identity

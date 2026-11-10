@@ -11,25 +11,21 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::OnceLock;
 use std::time::Duration;
 
-use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, raw_exchange, status};
+use common::{
+    ADMIN_TOKEN, Origin, ProxyHarness, Reply, TestResolver, admin_token_hash, base_config,
+    raw_exchange, status,
+};
 use serde_json::Value;
 
 const W: Duration = Duration::from_secs(5);
-const TOKEN: &str = "test-admin-token-0123456789";
-
-fn token_hash() -> &'static str {
-    static H: OnceLock<String> = OnceLock::new();
-    H.get_or_init(|| webfilter::auth::hash_password(TOKEN.as_bytes()).unwrap())
-}
 
 async fn lab(extra: &str, lists: &[(&str, &str)]) -> (ProxyHarness, SocketAddr) {
     let config = base_config(&format!(
         "{extra}\n[admin]\nenabled = true\nlisten = \"127.0.0.1:0\"\ntoken_hash = \"{}\"\n\
 [access_requests]\nenabled = true\n[state]\ndir = \"state\"\n[[profiles]]\nname = \"default\"\naccess_requests = true\n",
-        token_hash()
+        admin_token_hash()
     ));
     let resolver = TestResolver::with(&[("ok.test", "127.0.0.1"), ("bad.test", "127.0.0.1")]);
     let h = ProxyHarness::start(&config, lists, resolver).await;
@@ -55,7 +51,7 @@ async fn admin(
 }
 
 fn auth() -> String {
-    format!("Authorization: Bearer {TOKEN}\r\n")
+    format!("Authorization: Bearer {ADMIN_TOKEN}\r\n")
 }
 
 async fn api(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, Value) {
@@ -189,7 +185,7 @@ async fn auth_lockout_origin_and_security_headers() {
     assert!(audit.contains("auth_failed") || !audit.is_empty());
     for log in ["webfilter_admin.jsonl", "webfilter.jsonl", "webfilter_system.jsonl"] {
         let text = std::fs::read_to_string(h.lab.path().join("logs").join(log)).unwrap_or_default();
-        assert!(!text.contains(TOKEN), "the token never reaches {log}");
+        assert!(!text.contains(ADMIN_TOKEN), "the token never reaches {log}");
     }
 }
 
@@ -200,7 +196,7 @@ async fn e87_readonly_token_reads_only() {
     let ro_hash = webfilter::auth::hash_password(RO.as_bytes()).unwrap();
     let config = base_config(&format!(
         "[admin]\nenabled = true\nlisten = \"127.0.0.1:0\"\ntoken_hash = \"{}\"\nreadonly_token_hash = \"{ro_hash}\"\n",
-        token_hash()
+        admin_token_hash()
     ));
     let mut h = ProxyHarness::start(&config, &[], TestResolver::with(&[])).await;
     let a = h.handle.as_ref().unwrap().admin_addr.unwrap();
@@ -503,14 +499,16 @@ fn doctor_reports_without_secrets() {
     let lab = common::Lab::new();
     let cfg = webfilter::config::Config::load(&lab.write_config(&format!(
         "listen = \"127.0.0.1:0\"\n[admin]\nenabled = true\nlisten = \"127.0.0.1:0\"\ntoken_hash = \"{}\"\n[logging]\ndir = \"logs\"\n",
-        token_hash()
+        admin_token_hash()
     )))
     .unwrap();
     let results = webfilter::doctor::run(&cfg);
     assert!(
         results.iter().any(|(l, m)| *l == webfilter::doctor::Level::Pass && m.contains("log dir"))
     );
-    assert!(results.iter().all(|(_, m)| !m.contains(token_hash()) && !m.contains("argon2id$")));
+    assert!(
+        results.iter().all(|(_, m)| !m.contains(admin_token_hash()) && !m.contains("argon2id$"))
+    );
 }
 
 #[cfg(unix)]

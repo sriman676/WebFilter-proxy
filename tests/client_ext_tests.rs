@@ -16,35 +16,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use common::{Origin, ProxyHarness, Reply, TestResolver, base_config};
+use common::{Origin, ProxyHarness, Reply, TestResolver, base_config, run_client as client};
 use url::Url;
 use webfilter::batch;
 use webfilter::robots::Robots;
 use webfilter::snapshot;
-
-struct Run {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-async fn client(proxy: std::net::SocketAddr, out: &Path, args: &[&str]) -> Run {
-    let o = tokio::process::Command::new(env!("CARGO_BIN_EXE_webfilter-client"))
-        .arg("--proxy")
-        .arg(format!("http://{proxy}"))
-        .arg("--out-dir")
-        .arg(out)
-        .args(args)
-        .env_remove("WEBFILTER_PROXY")
-        .output()
-        .await
-        .unwrap();
-    Run {
-        code: o.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&o.stdout).into(),
-        stderr: String::from_utf8_lossy(&o.stderr).into(),
-    }
-}
 
 async fn proxy(lists: &[(&str, &str)]) -> ProxyHarness {
     let r = TestResolver::with(&[
