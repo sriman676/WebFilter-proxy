@@ -3,5 +3,5 @@
 useDefault = true
 
 [allowlist]
-description = "build output, never committed"
-paths = ['''(^|/)target/''', '''(^|/)fuzz/target/''']
+description = "build output and the launch-video workspace (gitignored, never committed)"
+paths = ['''(^|/)target/''', '''(^|/)fuzz/target/''', '''(^|/)brag-output/''']
