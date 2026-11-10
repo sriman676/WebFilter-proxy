@@ -37,3 +37,4 @@ lcov.info
 brag-output*/
 __pycache__/
 *.pyc
+brag-output/

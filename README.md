@@ -1,7 +1,28 @@
-# WebFilter Proxy (Rust)
+<h1 align="center">WebFilter Proxy</h1>
+
+<p align="center"><b>Every request gets a verdict.</b> A multi-threaded, security-first web filter and fetch client in Rust.</p>
+
+<p align="center">
+  <a href="docs/media/brag.mp4">
+    <img src="docs/media/brag-preview.gif" alt="WebFilter Proxy in 20 seconds: a blocked request, the block page, the live dashboard and the benchmark numbers" width="860">
+  </a>
+</p>
+
+<p align="center">▶ The preview loops on its own; click it to play the full video.</p>
+
+<p align="center">
+  <img alt="Rust 1.99 (edition 2024)" src="https://img.shields.io/badge/rust-1.99%20%C2%B7%202024-orange?logo=rust">
+  <img alt="unsafe forbidden" src="https://img.shields.io/badge/unsafe-forbidden-success">
+  <img alt="324 tests passing" src="https://img.shields.io/badge/tests-324%20passing-brightgreen">
+  <img alt="22 fuzz targets" src="https://img.shields.io/badge/fuzz-22%20targets-blue">
+  <img alt="h2spec 147/147" src="https://img.shields.io/badge/h2spec-147%2F147-brightgreen">
+  <img alt="17,764 requests per second" src="https://img.shields.io/badge/throughput-17.7k%20req%2Fs-blueviolet">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-lightgrey">
+</p>
 
 Multi-threaded HTTP/HTTPS forward proxy with blocklists, optional TLS interception and SIEM-ready JSON
-logs, plus a client that fetches URLs through the proxy and saves them as named HTML files.
+logs, plus a client that fetches URLs through the proxy and saves them as named HTML files. The full
+project write-up (architecture, technologies, security, testing, performance) is in [REPORT.md](REPORT.md).
 
 > Security lab project. Bind to loopback (the default); intercept only your own devices (D-30).
 

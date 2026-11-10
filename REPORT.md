@@ -91,7 +91,7 @@ translated between h1 and h2), with a frame-level flood guard.
 | Browser | **WebExtension** Manifest V3 (Chrome and Firefox) | status badge, recent blocks, proxy toggle |
 | Logging / SIEM | JSON lines, **OpenSearch** + security plugin, 16 detections, Docker Compose | SOC-style monitoring |
 | Metrics | Prometheus text format, validated with **promtool** | standard monitoring |
-| Testing | cargo **nextest**, **proptest**, **cargo-fuzz** (libFuzzer, 23 targets), **cargo-llvm-cov**, **h2spec**, **perf** | correctness, robustness, coverage, speed |
+| Testing | cargo **nextest**, **proptest**, **cargo-fuzz** (libFuzzer, 22 targets), **cargo-llvm-cov**, **h2spec**, **perf** | correctness, robustness, coverage, speed |
 | Supply chain | **cargo-deny**, **cargo-audit**, **cargo-geiger**, CycloneDX SBOM | known-vulnerability and license gates |
 | Lab | Linux network namespaces (transparent mode), Docker (ClamAV, OpenSearch) | realistic end-to-end tests |
 
@@ -162,7 +162,7 @@ The threat model (docs/THREAT_MODEL.md, STRIDE, 76 threats) maps every threat to
 |---|---|
 | Unit, integration and end-to-end tests | ⟨final⟩ tests (all passing), driving the real binaries |
 | Coverage | ⟨final⟩ % line coverage (gate passes) |
-| Fuzzing | 23 libFuzzer targets (parsers, rewriters, robots, plugins); findings fixed with regression tests |
+| Fuzzing | 22 libFuzzer targets (parsers, rewriters, robots, plugins); findings fixed with regression tests |
 | Differential testing | own HTTP/1 parser vs `httparse`, URL normalizer vs WHATWG |
 | HTTP/2 conformance | h2spec 147/147 |
 | Real-tool interop | curl, wget, Python, git, HTTP/1.0, ranges, SSE; Firefox/Chrome; ClamAV; OpenSearch |
